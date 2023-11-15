@@ -1,0 +1,291 @@
+<html>
+<head>
+    <meta charset="utf-8" />
+<meta name="description" content="" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<title>impacket解读 -- addcomputer浅析 | Iceberg-N</title>
+
+<link rel="shortcut icon" href="https://iceberg-n.github.io/favicon.ico?v=1700038557646">
+
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://iceberg-n.github.io/styles/main.css">
+<!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/css/bootstrap.min.css"> -->
+
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets/highlight.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages/dockerfile.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages//dart.min.js"></script>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.27.0/moment.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/js/bootstrap.min.js"></script> -->
+<!-- DEMO JS -->
+<!--<script src="media/scripts/index.js"></script>-->
+
+
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.css">
+    
+</head>
+<body>
+<div class="main gt-bg-theme-color-first">
+    <nav class="navbar navbar-expand-lg">
+    <a class="navbar-brand" href="/">
+        <img class="user-avatar" src="/images/avatar.png" alt="头像">
+        <div class="site-name gt-c-content-color-first">
+            Iceberg-N
+        </div>
+    </a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
+        aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation" id="changeNavbar">
+        <i class="fas fa-bars gt-c-content-color-first" style="font-size: 18px"></i>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <div class="navbar-nav mr-auto" style="text-align: center">
+            
+            <div class="nav-item">
+                
+                <a href="https://iceberg-n.github.io" class="menu gt-a-link">
+                    首页
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/archives" class="menu gt-a-link">
+                    归档
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/tags" class="menu gt-a-link">
+                    标签
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/post/about" class="menu gt-a-link">
+                    关于
+                </a>
+                
+            </div>
+            
+        </div>
+        <div style="text-align: center">
+            <form id="gridea-search-form" style="position: relative" data-update="1700038557646"
+                action="/search/">
+                <input class="search-input" autocomplete="off" spellcheck="false" name="q" placeholder="搜索文章" />
+                <i class="fas fa-search gt-c-content-color-first" style="position: absolute; top: 9px; left: 10px;"></i>
+            </form>
+        </div>
+    </div>
+</nav>
+<script>
+    /* 移动端导航栏展开/收起切换 */
+    document.getElementById('changeNavbar').onclick = () => {
+        var element = document.getElementById('navbarSupportedContent');
+        if (element.style.display === 'none' || element.style.display === '') {
+            element.style.display = 'block';
+        } else {
+            element.style.display = 'none';
+        }
+    }
+</script>
+
+    <div class="post-container">
+        <div class="post-detail gt-bg-theme-color-second">
+            <article class="gt-post-content">
+                <h2 class="post-title">
+                    impacket解读 -- addcomputer浅析
+                </h2>
+                <div class="post-info">
+                    <time class="post-time gt-c-content-color-first">
+                        · 2023-11-10 ·
+                    </time>
+                    
+                        <a href="https://iceberg-n.github.io/tag/impacket/" class="post-tags">
+                            # impacket
+                        </a>
+                    
+                        <a href="https://iceberg-n.github.io/tag/rpc/" class="post-tags">
+                            # rpc
+                        </a>
+                    
+                        <a href="https://iceberg-n.github.io/tag/nei-wang/" class="post-tags">
+                            # 内网
+                        </a>
+                    
+                </div>
+                <div class="post-content">
+                    <h1 id="addcomputer-浅析">addcomputer 浅析</h1>
+<!-- more -->
+<p>作用：域内创建机器账户；</p>
+<p>方法：samr(默认)、ldap；</p>
+<h2 id="samr">SAMR</h2>
+<h3 id="rpc绑定">RPC绑定</h3>
+<p>​		epm.hept_map()方法进行前期的RPC绑定以及EPM MAP请求操作</p>
+<pre><code class="language-python">if self.__targetIp is not None:
+            stringBinding = epm.hept_map(self.__targetIp, samr.MSRPC_UUID_SAMR, protocol = 'ncacn_np')
+        else:
+            stringBinding = epm.hept_map(self.__target, samr.MSRPC_UUID_SAMR, protocol = 'ncacn_np')
+</code></pre>
+<p>​		此段代码对应的流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588107180.png" alt="" loading="lazy"></p>
+<p>配置samr协议通信要用到的参数，samr服务器地址、端口、凭据等；</p>
+<pre><code class="language-python"> rpctransport = transport.DCERPCTransportFactory(stringBinding)
+        rpctransport.set_dport(self.__port)
+
+        if self.__targetIp is not None:
+            rpctransport.setRemoteHost(self.__targetIp)
+            rpctransport.setRemoteName(self.__target)
+
+        if hasattr(rpctransport, 'set_credentials'):
+            # This method exists only for selected protocol sequences.
+            rpctransport.set_credentials(self.__username, self.__password, self.__domain, self.__lmhash,
+                                         self.__nthash, self.__aesKey)
+
+        rpctransport.set_kerberos(self.__doKerberos, self.__kdcHost)
+</code></pre>
+<h3 id="rpc调用">RPC调用</h3>
+<p>​		doSAMRAdd()方法进行创建创建用户</p>
+<pre><code class="language-python">self.doSAMRAdd(rpctransport)
+</code></pre>
+<p>​		对应的流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588124358.png" alt="" loading="lazy"></p>
+<p>​	进入doSAMRAdd()方法中，以下是创建机器账户的大体流程：</p>
+<ul>
+<li>
+<p>dce = rpctransport.get_dce_rpc() //创建DCE/RPC实例</p>
+</li>
+<li>
+<p>dce.connect()  //与目标建立smb连接</p>
+</li>
+<li>
+<p>dec.bind(samr.MSRPC_UUID_SAMR)  //绑定到目标samr接口</p>
+<p>此处代码对应的流量：<br>
+<img src="https://iceberg-n.github.io/post-images/1699588130939.png" alt="" loading="lazy"></p>
+</li>
+<li>
+<p>samr.hSamrConnect5()  //连接samr服务器</p>
+</li>
+<li>
+<p>samr.hSamrEnumerateDomainsInSamServer()  //枚举目标服务器上的域</p>
+</li>
+<li>
+<p>samr.hSamrLookupDomainInSamServer()  //检索目标域名对应的SID</p>
+</li>
+<li>
+<p>samr.hSamrOpenDomain()  //获取samr服务器中目标域的句柄</p>
+</li>
+<li>
+<p>samr.hSamrCreateUser2InDomain()  //创建机器账户</p>
+</li>
+<li>
+<p>samr.hSamrSetPasswordInternal4New()  //设置机器账户密码</p>
+<p>上面的通信是经过SMBV3加密的，所以流量上看不出什么；</p>
+</li>
+</ul>
+<h2 id="ldap">LDAP</h2>
+<p>​		因为ldap3通信使用了SSL加密，抓包看不出明显特征，就不放流量图了，如果想看不加密可以将ldap3.Server()方法中的use_ssl设置为False，后面的文章会详细分析ldap通信；</p>
+<p>​		ldap3.Server()方法配置ldap服务器ip、端口、是否使用ssl加密等信息；</p>
+<pre><code>ldapServer = ldap3.Server(connectTo, use_ssl=True, port=self.__port, get_info=ldap3.ALL, tls=tls)
+</code></pre>
+<p>​		ldap3.Connection()方法进行认证，默认为NTLM认证，也可以使用Kerberos或hash认证；</p>
+<pre><code>if self.__doKerberos:
+                    ldapConn = ldap3.Connection(ldapServer)
+                    self.LDAP3KerberosLogin(ldapConn, self.__username, self.__password, self.__domain, self.__lmhash, self.__nthash,
+                                                 self.__aesKey, kdcHost=self.__kdcHost)
+                elif self.__hashes is not None:
+                    ldapConn = ldap3.Connection(ldapServer, user=user, password=self.__hashes, authentication=ldap3.NTLM)
+                    ldapConn.bind()
+                else:
+                    ldapConn = ldap3.Connection(ldapServer, user=user, password=self.__password, authentication=ldap3.NTLM)
+                    ldapConn.bind()
+</code></pre>
+<p>​		在目标ldap数据库中添加咱们创建的机器账户的各种属性，dnsHostName、userAccountControl、servicePrincipalName、unicodePwd等；</p>
+<pre><code>computerHostname = self.__computerName[:-1]
+                computerDn = ('CN=%s,%s' % (computerHostname, self.__computerGroup))
+
+                # Default computer SPNs
+                spns = [
+                    'HOST/%s' % computerHostname,
+                    'HOST/%s.%s' % (computerHostname, self.__domain),
+                    'RestrictedKrbHost/%s' % computerHostname,
+                    'RestrictedKrbHost/%s.%s' % (computerHostname, self.__domain),
+                ]
+                ucd = {
+                    'dnsHostName': '%s.%s' % (computerHostname, self.__domain),
+                    'userAccountControl': 0x1000,
+                    'servicePrincipalName': spns,
+                    'sAMAccountName': self.__computerName,
+                    'unicodePwd': ('&quot;%s&quot;' % self.__computerPassword).encode('utf-16-le')
+                }
+
+                res = ldapConn.add(computerDn, ['top','person','organizationalPerson','user','computer'], ucd)
+</code></pre>
+<h2 id="总结">总结</h2>
+<p>​		本次对impacket中的addcomputer脚本进行浅析，只是解释了关键步骤的代码；</p>
+<p>​		samr方法是通过samr协议对lsass.exe进行请求创建机器账户，并存储到ntds.dit数据库中；</p>
+<p>​		ldap方法是向域控的ldap数据库建立连接，在ldap中添加机器账户以及相关属性；</p>
+<p>将上面代码绘制成导图，方便理解；<br>
+<img src="https://iceberg-n.github.io/post-images/1699588251206.png" alt="" loading="lazy"></p>
+
+                </div>
+            </article>
+        </div>
+
+        
+            <div class="next-post">
+                <div class="next gt-c-content-color-first">下一篇</div>
+                <a href="https://iceberg-n.github.io/post/rpc/" class="post-title gt-a-link">
+                    MS-RPC -- RPC基础知识
+                </a>
+            </div>
+        
+
+        
+
+        
+
+        
+
+        <div class="site-footer gt-c-content-color-first">
+    <div class="slogan gt-c-content-color-first">iceberg-N的网安之路</div>
+    <div class="social-container">
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+    </div>
+    <div class="footer-info">
+        
+    </div>
+    <div>
+        Theme <a href="https://github.com/imhanjie/gridea-theme-pure" target="_blank">Pure</a>, Powered by <a
+                href="https://gridea.dev" target="_blank">Gridea</a> | <a href="https://iceberg-n.github.io/atom.xml" target="_blank">RSS</a>
+    </div>
+</div>
+
+<script>
+  hljs.highlightAll()
+</script>
+
+    </div>
+</div>
+</body>
+</html>

